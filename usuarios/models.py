@@ -1,0 +1,718 @@
+from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.db import models
+from django.conf import settings
+import qrcode
+from io import BytesIO
+from django.core.files import File
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+import datetime
+from django.utils import timezone
+from .validators import validar_extension_archivo, validar_extension_imagen, validar_documento_vehiculo, SecureFilePath, validar_rut_chileno
+
+class Rol(models.Model):
+
+    nombre = models.CharField(max_length=80)
+    descripcion = models.TextField(max_length=1200)
+    
+    # --- Permisos de Acceso a Módulos ---
+    ver_resumen_general = models.BooleanField(default=False, verbose_name="Resumen General")
+    ver_documentacion = models.BooleanField(default=False, verbose_name="Documentación")
+    ver_escanear_qr = models.BooleanField(default=False, verbose_name="Escanear QR")
+    ver_inventario = models.BooleanField(default=False, verbose_name="Inventario")
+    ver_salidas_terreno = models.BooleanField(default=False, verbose_name="Salidas a terreno")
+    ver_emergencias = models.BooleanField(default=False, verbose_name="Emergencias")
+    ver_capacitaciones = models.BooleanField(default=False, verbose_name="Cursos")
+    ver_malla_curricular = models.BooleanField(default=False, verbose_name="Malla Curricular")
+    ver_mantenimientos = models.BooleanField(default=False, verbose_name="Mantenimientos")
+    ver_proyectos = models.BooleanField(default=False, verbose_name="Proyectos")
+    ver_caja_chica = models.BooleanField(default=False, verbose_name="Caja Chica")
+    ver_avisos = models.BooleanField(default=False, verbose_name="Avisos")
+    ver_inspectores = models.BooleanField(default=False, verbose_name="Inspectores")
+
+    # --- Permisos de Edición / Creación / Eliminación ---
+    editar_documentacion = models.BooleanField(default=False, verbose_name="Editar Documentación")
+    editar_inventario = models.BooleanField(default=False, verbose_name="Editar Inventario")
+    gestionar_inventario_todas_companias = models.BooleanField(
+        default=False,
+        verbose_name="Gestionar inventario de todas las compañías",
+        help_text="Permite al rol administrar inventario y vehículos de cualquier compañía.",
+    )
+    editar_salidas_terreno = models.BooleanField(default=False, verbose_name="Editar Salidas a terreno")
+    editar_emergencias = models.BooleanField(default=False, verbose_name="Editar Emergencias")
+    editar_capacitaciones = models.BooleanField(default=False, verbose_name="Editar Cursos")
+    editar_malla_curricular = models.BooleanField(default=False, verbose_name="Editar Malla Curricular")
+    editar_mantenimientos = models.BooleanField(default=False, verbose_name="Editar Mantenimientos")
+    editar_proyectos = models.BooleanField(default=False, verbose_name="Editar Proyectos")
+    editar_caja_chica = models.BooleanField(default=False, verbose_name="Editar Caja Chica")
+    editar_avisos = models.BooleanField(default=False, verbose_name="Editar Avisos")
+    editar_inspectores = models.BooleanField(default=False, verbose_name="Editar Inspectores")
+
+    def __str__(self):
+        return self.nombre
+
+class Compania(models.Model):
+    nombre = models.CharField(max_length=80)
+    ubicacion = models.CharField(max_length=80)
+    logo = models.ImageField(upload_to=SecureFilePath('logos_companias/'), null=True, blank=True, verbose_name='Logo de la Compañía', validators=[validar_extension_imagen])
+    
+    def __str__(self):
+        return self.nombre 
+
+class UsuarioManager(BaseUserManager):
+    def miembros_activos(self):
+        return self.filter(is_active=True, compania__isnull=False)
+
+    def create_user(self, email, password=None, **extra_fields):
+        if not email:
+            raise ValueError('El email es obligatorio')
+        email = self.normalize_email(email)
+        user = self.model(email=email, **extra_fields)
+        user.set_password(password)
+        user.save(using=self._db)
+        return user
+
+    def create_superuser(self, email, password=None, **extra_fields):
+        extra_fields.setdefault('is_staff', True)
+        extra_fields.setdefault('is_superuser', True)
+        return self.create_user(email, password, **extra_fields)
+
+class Usuario(AbstractBaseUser, PermissionsMixin):
+    nombre = models.CharField(max_length=80)
+    apellido = models.CharField(max_length=80)
+    email = models.EmailField(unique=True, max_length=80)
+    rut = models.CharField(max_length=15, unique=True, null=True, blank=True, verbose_name='RUT', validators=[validar_rut_chileno])
+    clave_radial = models.CharField(max_length=20, null=True, blank=True, verbose_name='Clave Radial')
+    rol = models.ForeignKey(Rol, on_delete=models.SET_NULL, null=True, blank=True)
+    compania = models.ForeignKey(Compania, on_delete=models.SET_NULL, null=True, blank=True)
+    foto_perfil = models.ImageField(upload_to=SecureFilePath('fotos_perfil/'), null=True, blank=True, verbose_name='Foto de Perfil', validators=[validar_extension_imagen])
+    
+    # Campos requeridos para AbstractBaseUser
+    is_active = models.BooleanField(default=True)
+    is_staff = models.BooleanField(default=False)
+    date_joined = models.DateTimeField(auto_now_add=True)
+    
+    objects = UsuarioManager()
+    
+    USERNAME_FIELD = 'email'
+    REQUIRED_FIELDS = ['nombre', 'apellido', 'rut']
+    
+    def __str__(self):
+        return f"{self.nombre} {self.apellido} ({self.email})"
+    
+    def get_full_name(self):
+        return f"{self.nombre} {self.apellido}"
+    
+    def get_short_name(self):
+        return self.nombre
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            try:
+                old_usuario = Usuario.objects.get(pk=self.pk)
+                if old_usuario.compania != self.compania:
+                    # La compañía cambió, desasignar equipos de la compañía anterior
+                    items_a_desasignar = self.inventario_asignado.filter(compania=old_usuario.compania)
+                    for item in items_a_desasignar:
+                        item_name = item.get_nombre_display()
+                        item.asignado_a = None
+                        item.save() # El método save de Inventario limpiará automáticamente el código QR
+                        Notificacion.objects.create(
+                            usuario=self,
+                            mensaje=f"El equipo {item_name} fue devuelto a bodega por cambio de compañía.",
+                            link="/inventario/"
+                        )
+            except Usuario.DoesNotExist:
+                pass
+        super().save(*args, **kwargs)
+
+class Proyecto(models.Model):
+    TIPO_PROYECTO_CHOICES = [
+        ('Infraestructura', 'Infraestructura'),
+        ('Equipamiento', 'Equipamiento'),
+        ('Capacitación', 'Capacitación'),
+        ('Otro', 'Otro'),
+    ]
+
+    nombre = models.CharField(max_length=200)
+    descripcion = models.TextField()
+    fecha_inicio = models.DateField(null=True, blank=True)
+    fecha_fin = models.DateField(null=True, blank=True)
+    presupuesto = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    responsable = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='proyectos_responsable')
+    tipo = models.CharField(max_length=50, choices=TIPO_PROYECTO_CHOICES, default='Otro')
+    prioridad = models.PositiveIntegerField(default=50)
+    creado_por = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='proyectos_creados')
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.nombre
+
+class ArchivoProyecto(models.Model):
+    proyecto = models.ForeignKey(Proyecto, related_name='archivos', on_delete=models.CASCADE)
+    archivo = models.FileField(upload_to=SecureFilePath('proyectos_archivos/'), validators=[validar_extension_archivo])
+    subido_en = models.DateTimeField(auto_now_add=True)
+
+class Carpeta(models.Model):
+    nombre = models.CharField(max_length=100)
+    compania = models.ForeignKey(Compania, on_delete=models.CASCADE, null=True, blank=True, related_name='carpetas')
+    creado_por = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+    es_privado = models.BooleanField(default=False)
+    es_de_inspector = models.BooleanField(default=False)
+
+    def __str__(self):
+        return self.nombre
+
+    class Meta:
+        ordering = ['-creado_en']
+
+class Documento(models.Model):
+    TIPO_DOCUMENTO_CHOICES = [
+        ('General', 'Documento General'),
+        ('Orden del Día', 'Orden del Día'),
+        ('Circular', 'Circular'),
+        ('Formulario', 'Formulario'),
+        ('Otro', 'Otro'),
+    ]
+
+    nombre = models.CharField(max_length=200)
+    descripcion = models.TextField(blank=True)
+    archivo = models.FileField(upload_to=SecureFilePath('documentos/'), validators=[validar_extension_archivo])
+    tipo = models.CharField(max_length=50, choices=TIPO_DOCUMENTO_CHOICES, default='General')
+    carpeta = models.ForeignKey(Carpeta, on_delete=models.CASCADE, null=True, blank=True, related_name='documentos')
+    compania = models.ForeignKey(Compania, on_delete=models.CASCADE, null=True, blank=True, related_name='documentos')
+    subido_por = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    subido_en = models.DateTimeField(auto_now_add=True)
+    es_privado = models.BooleanField(default=False)
+    es_de_inspector = models.BooleanField(default=False)
+
+    def __str__(self):
+        return self.nombre
+
+    @property
+    def archivo_existe(self):
+        """Comprueba si el archivo físico aún existe en el sistema de archivos."""
+        if self.archivo:
+            try:
+                return self.archivo.storage.exists(self.archivo.name)
+            except Exception:
+                return False
+        return False
+
+    @property
+    def tamano_seguro(self):
+        """Devuelve el tamaño del archivo de forma segura, o 0 si no existe."""
+        if self.archivo_existe:
+            return self.archivo.size
+        return 0
+
+class SalidaTerreno(models.Model):
+    motivo = models.CharField(max_length=255)
+    direccion = models.CharField(max_length=255)
+    fecha_hora_salida = models.DateTimeField()
+    fecha_hora_regreso = models.DateTimeField(null=True, blank=True)
+    unidades_involucradas = models.CharField(max_length=200)
+    unidades = models.ManyToManyField(
+        'Vehiculo',
+        blank=True,
+        related_name='salidas_terreno',
+        verbose_name="Unidades involucradas",
+    )
+    kilometraje_salida = models.PositiveIntegerField(verbose_name="Kilometraje de Salida")
+    kilometraje_regreso = models.PositiveIntegerField(verbose_name="Kilometraje de Regreso", null=True)
+    personal_a_cargo = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='salidas_a_cargo')
+    descripcion = models.TextField(verbose_name="Reporte / Novedades", blank=True)
+    creado_por = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='salidas_creadas')
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-fecha_hora_salida']
+
+    def __str__(self):
+        return f"{self.motivo} - {self.fecha_hora_salida.strftime('%d/%m/%Y %H:%M')}"
+
+    @property
+    def kilometros_recorridos(self):
+        if self.kilometraje_regreso is not None and self.kilometraje_salida is not None:
+            return self.kilometraje_regreso - self.kilometraje_salida
+        return None
+
+class SalidaTerrenoUnidad(models.Model):
+    salida = models.ForeignKey(
+        SalidaTerreno,
+        on_delete=models.CASCADE,
+        related_name='asistencias_unidades',
+    )
+    unidad = models.ForeignKey(
+        'Vehiculo',
+        on_delete=models.CASCADE,
+        related_name='asistencias_salidas',
+    )
+    asistentes = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        blank=True,
+        related_name='asistencias_salidas_terreno',
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['salida', 'unidad'], name='unique_unidad_por_salida_terreno'),
+        ]
+
+    def __str__(self):
+        return f"{self.unidad.nombre} - {self.salida.motivo}"
+
+class Emergencia(models.Model):
+    TIPO_EMERGENCIA_CHOICES = [
+        ('10-0-1', 'Llamado Estructural'),
+        ('10-0-2', 'Llamado a Vehículo'),
+        ('10-1', 'Incendio Forestal'),
+        ('10-2', 'Rescate Vehicular'),
+        ('10-3', 'Rescate de Personas'),
+        ('10-4', 'Materiales Peligrosos'),
+        ('Otro', 'Otro'),
+    ]
+    ESTADO_CHOICES = [
+        ('Activa', 'Activa'),
+        ('Controlada', 'Controlada'),
+        ('Finalizada', 'Finalizada'),
+    ]
+
+    tipo = models.CharField(max_length=50, choices=TIPO_EMERGENCIA_CHOICES, default='Otro')
+    direccion = models.CharField(max_length=255, null=True, blank=True)
+    fecha_hora_alarma = models.DateTimeField(null=True, blank=True)
+    descripcion = models.TextField(verbose_name="Detalles del Incidente", null=True, blank=True)
+    unidades_despachadas = models.CharField(max_length=100, help_text="Ej: B-1, R-2, Z-3", null=True, blank=True)
+    oficial_a_cargo = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='emergencias_a_cargo')
+    estado = models.CharField(max_length=20, choices=ESTADO_CHOICES, default='Activa')
+    asistentes = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name='emergencias_asistidas', blank=True, verbose_name='Personal Asistente')
+    creado_por = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='emergencias_creadas')
+    creado_en = models.DateTimeField(auto_now_add=True)
+    documento_adjunto = models.FileField(upload_to=SecureFilePath('emergencias_docs/'), null=True, blank=True, validators=[validar_extension_archivo])
+    registro_completado = models.BooleanField(default=False, verbose_name="Registro Completado")
+
+    class Meta:
+        ordering = ['-fecha_hora_alarma']
+
+    def __str__(self):
+        return f"{self.get_tipo_display()} - {self.direccion}"
+
+class EmergenciaUnidad(models.Model):
+    emergencia = models.ForeignKey(
+        Emergencia,
+        on_delete=models.CASCADE,
+        related_name='unidades_asistencia',
+    )
+    unidad = models.ForeignKey(
+        'Vehiculo',
+        on_delete=models.CASCADE,
+        related_name='asistencias_emergencias',
+    )
+    asistentes = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        blank=True,
+        related_name='asistencias_emergencias_unidad',
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['emergencia', 'unidad'], name='unique_unidad_por_emergencia'),
+        ]
+
+    def __str__(self):
+        return f"{self.unidad.nombre} - {self.emergencia.get_tipo_display()}"
+
+class Capacitacion(models.Model):
+    MALLA_CHOICES = [
+        ('Nivel postulante', 'Nivel postulante'),
+        ('Nivel inicial', 'Nivel inicial'),
+        ('Nivel operativo', 'Nivel operativo'),
+        ('Nivel profesional', 'Nivel profesional'),
+        ('Nivel especialidad', 'Nivel especialidad'),
+        ('Otros', 'Otros'),
+    ]
+    
+    TIPO_ACTIVIDAD_CHOICES = [
+        ('Curso', 'Curso'),
+        ('Reunión', 'Reunión'),
+        ('Taller', 'Taller'),
+        ('Charla', 'Charla'),
+        ('Visita', 'Visita'),
+        ('Otro', 'Otro'),
+    ]
+
+    nombre = models.CharField(max_length=200)
+    tipo_actividad = models.CharField(max_length=50, choices=TIPO_ACTIVIDAD_CHOICES, default='Curso', verbose_name='Tipo de Actividad')
+    malla = models.CharField(max_length=50, choices=MALLA_CHOICES, default='Otros', verbose_name='Malla/Curso')
+    descripcion = models.TextField()
+    fecha_inicio = models.DateTimeField()
+    fecha_fin = models.DateTimeField(null=True, blank=True)
+    lugar = models.CharField(max_length=255)
+    instructor = models.CharField(max_length=150)
+    cupos = models.PositiveIntegerField(null=True, blank=True, help_text="Dejar en blanco si no hay límite")
+    asistentes = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name='capacitaciones_asistidas', blank=True)
+    companias_invitadas = models.ManyToManyField(Compania, related_name='capacitaciones_invitadas', blank=True)
+    creado_por = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='capacitaciones_creadas')
+    documento_adjunto = models.FileField(upload_to=SecureFilePath('reuniones/'), null=True, blank=True, validators=[validar_extension_archivo])
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-fecha_inicio']
+        verbose_name = "Curso"
+        verbose_name_plural = "Cursos"
+
+    def __str__(self):
+        return self.nombre
+
+
+class CursoMalla(models.Model):
+    NIVELES = [
+        ('Nivel postulante', 'Nivel postulante'),
+        ('Nivel inicial', 'Nivel inicial'),
+        ('Nivel operativo', 'Nivel operativo'),
+        ('Nivel profesional', 'Nivel profesional'),
+        ('Cursos complementarios', 'Cursos complementarios'),
+    ]
+
+    nombre = models.CharField(max_length=220, unique=True)
+    nivel = models.CharField(max_length=40, choices=NIVELES)
+    orden = models.PositiveSmallIntegerField(default=0)
+    complementario = models.BooleanField(default=False)
+    aula_virtual = models.BooleanField(default=False)
+    usuarios = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        blank=True,
+        related_name='ramos_malla_curricular',
+    )
+
+    class Meta:
+        ordering = ['nivel', 'orden', 'nombre']
+        verbose_name = 'Ramo de la malla curricular'
+        verbose_name_plural = 'Ramos de la malla curricular'
+
+    def __str__(self):
+        return self.nombre
+
+class Notificacion(models.Model):
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='notificaciones_recibidas')
+    mensaje = models.CharField(max_length=255)
+    leida = models.BooleanField(default=False)
+    fecha_creacion = models.DateTimeField(auto_now_add=True)
+    link = models.CharField(max_length=255, blank=True, null=True)
+
+    class Meta:
+        ordering = ['-fecha_creacion']
+
+    def __str__(self):
+        return self.mensaje
+
+class Mantenimiento(models.Model):
+    ESTADO_CHOICES = [
+        ('Pendiente', 'Pendiente'),
+        ('En Progreso', 'En Progreso'),
+        ('Finalizado', 'Finalizado'),
+    ]
+    TIPO_CHOICES = [
+        ('Preventivo', 'Preventivo'),
+        ('Correctivo', 'Correctivo'),
+    ]
+
+    vehiculo = models.CharField(max_length=100, help_text="Ej: Hyundai - XYZ123")
+    fecha = models.DateField()
+    fecha_resolucion = models.DateField(null=True, blank=True, verbose_name="Fecha de Resolución")
+    descripcion = models.TextField()
+    costo = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
+    responsable = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='mantenimientos_responsable')
+    compania_caja = models.ForeignKey(Compania, on_delete=models.SET_NULL, null=True, blank=True, related_name='mantenimientos_pagados', verbose_name="Caja de Compañía")
+    estado = models.CharField(max_length=20, choices=ESTADO_CHOICES, default='Pendiente')
+    tipo = models.CharField(max_length=20, choices=TIPO_CHOICES, default='Preventivo')
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-fecha']
+
+    def __str__(self):
+        return f"Mantenimiento de {self.vehiculo} el {self.fecha}"
+
+    def save(self, *args, **kwargs):
+        from django.utils import timezone
+        today = timezone.now().date()
+        
+        if self.fecha_resolucion and self.fecha_resolucion <= today:
+            self.estado = 'Finalizado'
+        elif self.fecha and self.fecha <= today:
+            self.estado = 'En Progreso'
+        else:
+            self.estado = 'Pendiente'
+            
+        super().save(*args, **kwargs)
+
+class ArchivoMantenimiento(models.Model):
+    mantenimiento = models.ForeignKey(Mantenimiento, related_name='archivos', on_delete=models.CASCADE)
+    archivo = models.FileField(upload_to=SecureFilePath('mantenimientos_archivos/'), validators=[validar_extension_archivo])
+    subido_en = models.DateTimeField(auto_now_add=True)
+
+class Vehiculo(models.Model):
+    ESTADO_CHOICES = [
+        ('Disponible', 'Operativo'),
+        ('En Servicio', 'En Servicio'),
+        ('En Taller', 'En Taller'),
+        ('Fuera de Servicio', 'Fuera de Servicio'),
+    ]
+
+    COMBUSTIBLE_CHOICES = [
+        ('Diesel', 'Diésel'),
+        ('Gasolina', 'Gasolina'),
+        ('Otro', 'Otro'),
+    ]
+    BOMBA_UNIDAD_CHOICES = [
+        ('LPM', 'L/min'),
+        ('GPM', 'GPM'),
+    ]
+
+    nombre = models.CharField(max_length=80, verbose_name="Nombre / Código del Carro")
+    compania = models.ForeignKey(Compania, on_delete=models.CASCADE, related_name='vehiculos', verbose_name="Compañía")
+    patente = models.CharField(max_length=15, verbose_name="Patente")
+    descripcion = models.TextField(max_length=500, null=True, blank=True, verbose_name="Descripción")
+    marca = models.CharField(max_length=80, default='', verbose_name="Marca")
+    modelo = models.CharField(max_length=80, default='', verbose_name="Modelo")
+    anio_fabricacion = models.PositiveSmallIntegerField(null=True, blank=True, verbose_name="Año de fabricación")
+    anio_puesta_servicio = models.PositiveSmallIntegerField(null=True, blank=True, verbose_name="Año de puesta en servicio")
+    estado = models.CharField(max_length=20, choices=ESTADO_CHOICES, default='Disponible')
+
+    # Datos técnicos y legales de la hoja de vida (se completan desde su ficha).
+    combustible = models.CharField(max_length=20, choices=COMBUSTIBLE_CHOICES, blank=True, default='')
+    capacidad_estanque_litros = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    capacidad_estanque_agua_litros = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    capacidad_bomba = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    capacidad_bomba_unidad = models.CharField(max_length=4, choices=BOMBA_UNIDAD_CHOICES, blank=True, default='')
+    horometro = models.DecimalField(max_digits=10, decimal_places=1, null=True, blank=True)
+    revision_tecnica_vencimiento = models.DateField(null=True, blank=True)
+    revision_tecnica_archivo = models.FileField(
+        upload_to=SecureFilePath('vehiculos_documentacion/'),
+        validators=[validar_documento_vehiculo],
+        null=True,
+        blank=True,
+        verbose_name='Documento de revisión técnica',
+    )
+    permiso_circulacion_vencimiento = models.DateField(null=True, blank=True)
+    permiso_circulacion_archivo = models.FileField(
+        upload_to=SecureFilePath('vehiculos_documentacion/'),
+        validators=[validar_documento_vehiculo],
+        null=True,
+        blank=True,
+        verbose_name='Documento de permiso de circulación',
+    )
+    soap_vencimiento = models.DateField(null=True, blank=True)
+    seguro_numero_poliza = models.CharField(max_length=100, blank=True, default='')
+    seguro_vencimiento = models.DateField(null=True, blank=True)
+    neumaticos_estado = models.CharField(max_length=160, blank=True, default='')
+    neumaticos_ultimo_cambio = models.DateField(null=True, blank=True)
+    bateria_fecha_instalacion = models.DateField(null=True, blank=True)
+
+    def __str__(self):
+        return f"{self.nombre} ({self.compania.nombre})"
+
+
+class RondaVehiculo(models.Model):
+    TIPO_HALLAZGO_CHOICES = [
+        ('Sin novedad', 'Sin novedad'),
+        ('Falla', 'Falla'),
+        ('Observación', 'Observación'),
+        ('Otro', 'Otro'),
+    ]
+
+    vehiculo = models.ForeignKey(Vehiculo, on_delete=models.CASCADE, related_name='rondas')
+    registrado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='rondas_vehiculos',
+    )
+    fecha = models.DateTimeField(auto_now_add=True)
+    tipo_hallazgo = models.CharField(max_length=20, choices=TIPO_HALLAZGO_CHOICES, default='Sin novedad')
+    detalle = models.TextField(verbose_name='Falla, observación o detalle')
+    estado_operativo = models.CharField(max_length=20, choices=Vehiculo.ESTADO_CHOICES, blank=True)
+
+    class Meta:
+        ordering = ['-fecha']
+        verbose_name = 'Ronda de vehículo'
+        verbose_name_plural = 'Rondas de vehículos'
+
+    def __str__(self):
+        return f"Ronda de {self.vehiculo.nombre} ({self.fecha:%d/%m/%Y})"
+
+class Inventario(models.Model):
+    ESTADO_CHOICES = [
+        ('Bueno', 'Bueno'),
+        ('Regular', 'Regular'),
+        ('Malo', 'Malo'),
+        ('En Reparación', 'En Reparación'),
+        ('De Baja', 'De Baja'),
+    ]
+
+    ITEM_CHOICES = [
+        ('Casco de bombero', 'Casco de bombero (F1, F2, etc.)'),
+        ('Equipo de respiración autónoma (ERA)', 'Equipo de respiración autónoma (ERA)'),
+        ('Traje estructural', 'Traje estructural (chaquetón y pantalón)'),
+        ('Botas estructurales', 'Botas estructurales'),
+        ('Guantes de bombero', 'Guantes de bombero'),
+        ('Monja / capucha ignífuga', 'Monja / capucha ignífuga'),
+        ('Linterna para casco', 'Linterna para casco'),
+        ('Hacha de bombero', 'Hacha de bombero'),
+        ('Herramienta Halligan', 'Herramienta Halligan'),
+        ('Manguera de 1.5 pulgadas', 'Manguera de 1.5"'),
+        ('Manguera de 2.5 pulgadas', 'Manguera de 2.5"'),
+        ('Pitón / Lanza de agua', 'Pitón / Lanza de agua'),
+        ('Escala de extensión', 'Escala de extensión'),
+        ('Cámara térmica', 'Cámara térmica'),
+        ('Detector de gases', 'Detector de gases'),
+        ('Otro', 'Otro (especificar en descripción)'),
+    ]
+
+    ITEM_CHOICES_DICT = dict(ITEM_CHOICES)
+
+    nombre = models.CharField(max_length=200)
+    compania = models.ForeignKey(Compania, on_delete=models.SET_NULL, null=True, blank=True, related_name='inventario')
+    ubicacion = models.CharField(max_length=150, help_text="Ej: Bodega 1, Carro B-2")
+    estado = models.CharField(max_length=20, choices=ESTADO_CHOICES, default='Bueno')
+    fecha_adquisicion = models.DateField(null=True, blank=True)
+    asignado_a = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='inventario_asignado')
+    asignado_a_vehiculo = models.ForeignKey(Vehiculo, on_delete=models.SET_NULL, null=True, blank=True, related_name='inventario_asignado', verbose_name="Asignado a Carro")
+    qr_code = models.ImageField(upload_to='qr_codes/', blank=True)
+    agregado_por = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='inventario_agregado')
+    agregado_en = models.DateTimeField(auto_now_add=True)
+    valor = models.IntegerField(null=True, blank=True, verbose_name="Valor ($)", help_text="Valor estimado o de compra")
+
+    class Meta:
+        ordering = ['nombre']
+
+    def __str__(self):
+        if self.asignado_a:
+            asignacion = f"Asignado a: {self.asignado_a.get_full_name()}"
+        elif self.asignado_a_vehiculo:
+            asignacion = f"Asignado a Carro: {self.asignado_a_vehiculo.nombre}"
+        else:
+            asignacion = "Sin asignar / Bodega"
+        return f"{self.get_nombre_display()} - {asignacion}"
+
+    @staticmethod
+    def get_nombre_completo(nombre_clave):
+        return Inventario.ITEM_CHOICES_DICT.get(nombre_clave, nombre_clave)
+        
+    def get_nombre_display(self):
+        return Inventario.ITEM_CHOICES_DICT.get(self.nombre, self.nombre)
+
+    def save(self, *args, **kwargs):
+        # Guardamos primero para asegurarnos de que el objeto tiene un 'pk' (ID)
+        # si es una nueva instancia.
+        super().save(*args, **kwargs)
+
+        qr_updated = False
+        # Generar QR solo si hay un usuario o carro asignado
+        if self.asignado_a or self.asignado_a_vehiculo:
+            # Usamos un formato simple y robusto: solo el ID del ítem.
+            qr_content = str(self.id)
+            qr_img = qrcode.make(qr_content)
+            buffer = BytesIO()
+            qr_img.save(buffer, format='PNG')
+            file_name = f'item_{self.id}.png'
+            self.qr_code.save(file_name, File(buffer), save=False)
+            qr_updated = True
+        
+        # Si se desasigna de ambos, limpiar el QR
+        elif not self.asignado_a and not self.asignado_a_vehiculo and self.qr_code:
+            self.qr_code.delete(save=False)
+            qr_updated = True
+
+        if qr_updated:
+            # Guardamos los cambios del QR en una sola llamada para evitar bucles
+            super().save(update_fields=['qr_code'])
+
+class CajaChica(models.Model):
+    TIPO_MOVIMIENTO_CHOICES = [
+        ('Ingreso', 'Ingreso'),
+        ('Egreso', 'Egreso'),
+    ]
+    TIPO_CUENTA_CHOICES = [
+        ('caja_propia', 'Caja propia'),
+        ('cuenta_bancaria', 'Cuenta bancaria'),
+    ]
+
+    fecha = models.DateTimeField(auto_now_add=True)
+    tipo = models.CharField(max_length=10, choices=TIPO_MOVIMIENTO_CHOICES)
+    tipo_cuenta = models.CharField(
+        max_length=20,
+        choices=TIPO_CUENTA_CHOICES,
+        blank=True,
+        default='',
+        verbose_name='Tipo de cuenta',
+    )
+    monto = models.DecimalField(max_digits=10, decimal_places=2)
+    descripcion = models.CharField(max_length=255)
+    responsable = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    compania = models.ForeignKey(Compania, on_delete=models.CASCADE, null=True, blank=True, related_name='movimientos_caja')
+    documento_adjunto = models.FileField(upload_to=SecureFilePath('caja_chica/'), null=True, blank=True, validators=[validar_extension_archivo])
+
+    class Meta:
+        ordering = ['-fecha']
+        verbose_name = "Movimiento de Caja Chica"
+        verbose_name_plural = "Movimientos de Caja Chica"
+
+class Aviso(models.Model):
+    titulo = models.CharField(max_length=200)
+    mensaje = models.TextField()
+    creado_por = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='avisos_creados')
+    fecha_creacion = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['-fecha_creacion']
+
+class AvisoDestinatario(models.Model):
+    aviso = models.ForeignKey(Aviso, on_delete=models.CASCADE, related_name='destinatarios')
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='avisos_asignados')
+    leido = models.BooleanField(default=False)
+    fecha_lectura = models.DateTimeField(null=True, blank=True)
+
+class PasswordResetCode(models.Model):
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    codigo = models.CharField(max_length=6)
+    creado_en = models.DateTimeField(auto_now_add=True)
+    usado = models.BooleanField(default=False)
+    intentos = models.PositiveIntegerField(default=0)
+
+    def is_valid(self):
+        from django.utils import timezone
+        import datetime
+        now = timezone.now()
+        creado_en_aware = self.creado_en
+        if timezone.is_naive(self.creado_en):
+            creado_en_aware = timezone.make_aware(self.creado_en, timezone.get_current_timezone())
+        return not self.usado and self.intentos < 5 and (now - creado_en_aware) < datetime.timedelta(minutes=15)
+
+
+class RegistroPendiente(models.Model):
+    email = models.EmailField(max_length=80, unique=True)
+    nombre = models.CharField(max_length=80)
+    apellido = models.CharField(max_length=80)
+    rut = models.CharField(max_length=15)
+    clave_radial = models.CharField(max_length=20, null=True, blank=True)
+    compania = models.ForeignKey(Compania, on_delete=models.SET_NULL, null=True, blank=True)
+    foto_perfil = models.ImageField(
+        upload_to=SecureFilePath('registros_pendientes/'),
+        null=True,
+        blank=True,
+        validators=[validar_extension_imagen],
+    )
+    password = models.CharField(max_length=128)
+    codigo = models.CharField(max_length=6)
+    creado_en = models.DateTimeField(default=timezone.now)
+    intentos = models.PositiveIntegerField(default=0)
+
+    def is_valid(self):
+        return self.intentos <= 5 and (timezone.now() - self.creado_en) < datetime.timedelta(minutes=15)
+
+    def __str__(self):
+        return f"Registro pendiente para {self.email}"

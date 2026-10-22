@@ -1,0 +1,118 @@
+{% extends 'base_con_condicion.html' %}
+
+{% block title %}Inicio - {{ block.super }}{% endblock %}
+
+{% block content %}
+<!-- Contenido de Inicio -->
+<main>
+    <div class="d-flex flex-column flex-md-row align-items-start justify-content-between mb-4 home-welcome">
+        <div>
+            <h1 class="h3 mb-2 text-dark home-welcome-title">Bienvenido, {{ user.get_full_name }}</h1>
+            <p class="text-muted home-welcome-description">Accede rápidamente a las funciones principales del sistema.</p>
+        </div>
+        
+    </div>
+
+    <!-- Sección de Avisos -->
+    {% if avisos_usuario %}
+    <div class="mb-4">
+        <h2 class="h5 mb-3 text-dark"><i class="bi bi-bell-fill text-warning me-2"></i>Avisos Recientes</h2>
+        <div class="row g-3">
+            {% for dest in avisos_usuario %}
+            <div class="col-md-6 col-lg-4">
+                <div class="card h-100 {% if not dest.leido %}border-danger border-2 shadow-sm{% else %}border-light-subtle bg-light{% endif %}">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-start mb-2">
+                            <h5 class="card-title fs-6 mb-0">{{ dest.aviso.titulo }}</h5>
+                            {% if not dest.leido %}
+                                <span class="badge bg-danger">Nuevo</span>
+                            {% endif %}
+                        </div>
+                        <p class="card-text small text-muted mb-3 text-truncate" style="max-height: 40px;">
+                            {{ dest.aviso.mensaje|striptags }}
+                        </p>
+                        <div class="d-flex justify-content-between align-items-center mt-auto">
+                            <small class="text-muted" style="font-size: 0.75rem;">
+                                {{ dest.aviso.fecha_creacion|date:"d M Y, H:i" }}
+                            </small>
+                            <a href="{% url 'aviso_leer' dest.id %}" class="btn btn-sm {% if not dest.leido %}btn-danger{% else %}btn-outline-secondary{% endif %}">
+                                {% if not dest.leido %}Leer{% else %}Ver{% endif %}
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    <hr class="mb-4">
+    {% endif %}
+
+    <style>
+        .module-home-card {
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        .module-home-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.1) !important;
+        }
+        @media (max-width: 767.98px) {
+            .module-home-card .card-body {
+                padding: 0.85rem 0.5rem !important;
+            }
+            .module-icon-wrapper {
+                width: 44px !important;
+                height: 44px !important;
+                margin-bottom: 0.4rem !important;
+            }
+            .module-icon-wrapper i {
+                font-size: 1.3rem !important;
+            }
+            .module-home-title {
+                font-size: 0.82rem !important;
+                font-weight: 700 !important;
+                line-height: 1.25 !important;
+                min-height: 2.1rem;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                margin-bottom: 0.35rem !important;
+            }
+            .module-home-btn {
+                padding: 0.25rem 0.4rem !important;
+                font-size: 0.75rem !important;
+                border-radius: 6px;
+            }
+        }
+    </style>
+
+    <h2 class="h5 mb-3 text-dark">Módulos Disponibles</h2>
+    <div class="row row-cols-2 row-cols-md-2 row-cols-lg-3 g-1 g-md-4">
+        {% for module in modules %}
+            <div class="col">
+                <div class="card h-100 shadow-sm border-light-subtle module-home-card">
+                    <div class="card-body text-center p-2 p-sm-3 p-md-4 d-flex flex-column justify-content-between">
+                        <div>
+                            <div class="d-inline-flex align-items-center justify-content-center bg-light rounded-circle mb-2 mb-md-3 module-icon-wrapper" style="width: 56px; height: 56px;">
+                                <i class="{{ module.icon }} fs-3 fs-md-2 text-danger"></i>
+                            </div>
+                            <h5 class="card-title module-home-title mb-1 mb-md-2">{{ module.title }}</h5>
+                            <p class="card-text text-muted small d-none d-md-block mb-2">{{ module.desc }}</p>
+                        </div>
+                        <a href="{% if module.url_name != '#' %}{% url module.url_name %}{% else %}#{% endif %}" class="btn btn-sm btn-outline-danger w-100 mt-2 mt-md-3 module-home-btn{% if module.url_name == '#' %} disabled{% endif %}">
+                            Acceder
+                        </a>
+                    </div>
+                </div>
+            </div>
+        {% endfor %}
+    </div>
+</main>
+<style>
+    @media (max-width: 767.98px) {
+        .home-welcome { margin-bottom: 1rem !important; }
+        .home-welcome-title { font-size: 1.15rem !important; line-height: 1.3; margin-bottom: .35rem !important; }
+        .home-welcome-description { font-size: .9rem; line-height: 1.4; margin-bottom: 0; }
+    }
+</style>
+{% endblock %}

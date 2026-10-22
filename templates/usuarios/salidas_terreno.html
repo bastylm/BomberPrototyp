@@ -1,0 +1,747 @@
+{% extends 'base_con_condicion.html' %}
+
+{% block title %}Salidas a Terreno - {{ block.super }}{% endblock %}
+
+{% block content %}
+<style>
+    .salidas-filter-form .form-control:focus,
+    .salidas-filter-form .form-select:focus {
+        border-color: #dc3545;
+        box-shadow: 0 0 0 .25rem rgba(220, 53, 69, .25);
+    }
+</style>
+
+<!-- Header del contenido principal -->
+<header class="d-flex flex-column flex-sm-row align-items-sm-center justify-content-between gap-3 pb-3 mb-4 border-bottom">
+    <h1 class="h2 mb-0">Gestión de Salidas a Terreno</h1>
+    {% if request.user.is_superuser or request.user.rol.editar_salidas_terreno %}
+    <button class="btn btn-danger" data-bs-toggle="modal" data-bs-target="#createSalidaModal">
+        <i class="bi bi-plus-lg me-1"></i> Registrar Salida
+    </button>
+    {% endif %}
+</header>
+
+<!-- Contenido de Salidas -->
+<main>
+    {% if messages %}
+        {% for message in messages %}
+        <div class="alert alert-{{ message.tags }} alert-dismissible fade show" role="alert">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+        </div>
+        {% endfor %}
+    {% endif %}
+
+    <!-- Formulario de Búsqueda y Filtros -->
+    <div class="d-md-none mb-3">
+        <button class="btn btn-outline-danger w-100 d-flex align-items-center justify-content-between py-2 px-3 shadow-sm rounded-3 filter-toggle-btn" type="button" data-bs-toggle="collapse" data-bs-target="#salidasFilterCollapse" aria-expanded="false" aria-controls="salidasFilterCollapse">
+            <span class="fw-semibold"><i class="bi bi-funnel-fill me-2"></i>Filtros de Búsqueda</span>
+            <span class="badge bg-danger-subtle text-danger border border-danger-subtle"><span class="filter-toggle-state">Desplegar</span> <i class="bi bi-chevron-down ms-1"></i></span>
+        </button>
+    </div>
+
+    <div class="collapse d-md-block" id="salidasFilterCollapse">
+    <div class="card shadow-sm mb-4">
+        <div class="card-body">
+            <form method="get" class="row g-3 align-items-end salidas-filter-form">
+                <div class="col-lg-4">
+                    <label for="q" class="form-label">Buscar por dirección, unidades...</label>
+                    <input type="text" name="q" id="salidaSearchInput" class="form-control" value="{{ request.GET.q|default:'' }}">
+                </div>
+                <div class="col-lg-3">
+                    <label for="motivo" class="form-label">Tipo de Salida</label>
+                    <select name="motivo" id="salidaMotivoFilter" class="form-select" onchange="this.form.submit()">
+                        <option value="">Todos los tipos</option>
+                        {% for m in motivos_unicos %}
+                            <option value="{{ m }}" {% if request.GET.motivo == m %}selected{% endif %}>{{ m }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-lg-3">
+                    <label for="usuario" class="form-label">Personal a Cargo</label>
+                    <select name="usuario" id="salidaUserFilter" class="form-select" onchange="this.form.submit()">
+                        <option value="">Todos</option>
+                        {% for user in usuarios_con_salidas %}<option value="{{ user.id }}" {% if request.GET.usuario == user.id|stringformat:"s" %}selected{% endif %}>{{ user.get_full_name }}</option>{% endfor %}
+                    </select>
+                </div>
+                <div class="col-lg-2">
+                    <label for="ordenar_por" class="form-label">Ordenar por</label>
+                    <select name="ordenar_por" id="ordenar_por" class="form-select" onchange="this.form.submit()">
+                        <option value="-fecha_hora_salida" {% if request.GET.ordenar_por == '-fecha_hora_salida' %}selected{% endif %}>Más nuevas</option>
+                        <option value="fecha_hora_salida" {% if request.GET.ordenar_por == 'fecha_hora_salida' %}selected{% endif %}>Más antiguas</option>
+                        <option value="motivo" {% if request.GET.ordenar_por == 'motivo' %}selected{% endif %}>Motivo (A-Z)</option>
+                        <option value="-motivo" {% if request.GET.ordenar_por == '-motivo' %}selected{% endif %}>Motivo (Z-A)</option>
+                    </select>
+                </div>
+            </form>
+        </div>
+    </div>
+    </div>
+
+    <div class="card shadow-sm">
+        <div class="card-body">
+            <h5 class="card-title">Historial de Salidas</h5>
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead>
+                        <tr>
+                            <th scope="col">Motivo / Dirección</th>
+                            <th scope="col">Fecha y Hora Salida</th>
+                            <th scope="col">Fecha y Hora Regreso</th>
+                            <th scope="col">Unidades</th>
+                            <th scope="col">Km Recorridos</th>
+                            <th scope="col">A Cargo</th>
+                            <th scope="col">Asistencia por unidad</th>
+                            <th scope="col">Acciones</th>
+                        </tr>
+                    </thead>
+                <tbody id="salidasTableBody">
+                    <tr id="no-salidas-found" style="display: none;"><td colspan="8" class="text-center text-muted py-4">No se encontraron salidas con los filtros aplicados.</td></tr>
+                        {% for salida in salidas %}
+                        <tr>
+                            <td>
+                                <strong>{{ salida.motivo }}</strong>
+                                <p class="text-muted small mb-0">{{ salida.direccion }}</p>
+                            </td>
+                            <td>{{ salida.fecha_hora_salida|date:"d/m/Y H:i" }}</td>
+                            <td>{{ salida.fecha_hora_regreso|date:"d/m/Y H:i"|default:"En servicio" }}</td>
+                            <td>
+                                {% for unidad in salida.unidades.all %}
+                                    <span class="badge bg-light text-dark border">{{ unidad.nombre }}{% if unidad.patente %} · {{ unidad.patente }}{% endif %}</span>
+                                {% empty %}
+                                    {{ salida.unidades_involucradas|default:"—" }}
+                                {% endfor %}
+                            </td>
+                            <td>
+                                {% if salida.kilometraje_regreso %}
+                                    {{ salida.kilometros_recorridos }} km
+                                {% else %} - {% endif %}
+                            </td>
+                            <td>{{ salida.personal_a_cargo.get_full_name|default:"N/A" }}</td>
+                            <td>
+                                {% for detalle in salida.detalles_asistencia %}
+                                    <div class="mb-1">
+                                        <strong>{{ detalle.unidad.nombre }}:</strong>
+                                        {% for usuario in detalle.asistentes_visibles %}
+                                            {{ usuario.get_full_name }}{% if not forloop.last %}, {% endif %}
+                                        {% empty %}
+                                            <span class="text-muted">Sin asistencia marcada</span>
+                                        {% endfor %}
+                                    </div>
+                                {% empty %}
+                                    {% for unidad in salida.unidades.all %}
+                                        <div class="mb-1"><strong>{{ unidad.nombre }}:</strong> <span class="text-muted">Sin asistencia marcada</span></div>
+                                    {% empty %}
+                                        <span class="text-muted">Sin detalle de asistencia</span>
+                                    {% endfor %}
+                                {% endfor %}
+                            </td>
+                            <td>
+                                {% if request.user.is_superuser or request.user.rol.editar_salidas_terreno %}
+                                <div class="btn-group" role="group">
+                                    <button type="button" class="btn btn-sm btn-outline-primary"
+                                            data-bs-toggle="modal"
+                                            data-bs-target="#editSalidaModal"
+                                            data-salida-id="{{ salida.id }}"
+                                            data-salida-motivo="{{ salida.motivo }}"
+                                            data-salida-direccion="{{ salida.direccion }}"
+                                            data-salida-fecha_hora_salida="{{ salida.fecha_hora_salida|date:'Y-m-d\TH:i' }}"
+                                            data-salida-fecha_hora_regreso="{{ salida.fecha_hora_regreso|date:'Y-m-d\TH:i' }}"
+                                            data-salida-unidades="{% for unidad in salida.unidades.all %}{{ unidad.id }}{% if not forloop.last %},{% endif %}{% endfor %}"
+                                            data-salida-kilometraje_salida="{{ salida.kilometraje_salida }}"
+                                            data-salida-kilometraje_regreso="{{ salida.kilometraje_regreso }}"
+                                            data-salida-personal_a_cargo="{{ salida.personal_a_cargo.id }}"
+                                            data-salida-asistencia="{{ salida.asistencia_unidades_json }}"
+                                            data-salida-descripcion="{{ salida.descripcion }}">
+                                        <i class="bi bi-pencil-fill"></i>
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-danger"
+                                            data-bs-toggle="modal"
+                                            data-bs-target="#deleteSalidaModal"
+                                            data-salida-id="{{ salida.id }}"
+                                            data-salida-motivo="{{ salida.motivo }}">
+                                        <i class="bi bi-trash-fill"></i>
+                                    </button>
+                                </div>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% empty %}
+                        <tr>
+                            <td colspan="8" class="text-center text-muted py-4">No hay salidas registradas todavía.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</main>
+
+<!-- Selección secuencial de unidades y asistencia por carro -->
+<template id="unidadAsistenciaGroupTemplate">
+    <div class="unidad-asistencia-card border rounded p-3 mb-3" data-unidad-asistencia>
+        <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+            <label class="form-label mb-0">Unidad</label>
+            <button type="button" class="btn btn-sm btn-outline-danger" data-remove-unidad aria-label="Quitar unidad">
+                <i class="bi bi-trash"></i> Quitar
+            </button>
+        </div>
+        <select class="form-select unidad-asistencia-select" data-unidad-select>
+            <option value="">Seleccionar carro</option>
+            {% for choice in form.unidades.field.choices %}
+                {% if choice.0 %}<option value="{{ choice.0 }}">{{ choice.1 }}</option>{% endif %}
+            {% endfor %}
+        </select>
+        <div class="mt-3" data-asistencia-panel hidden>
+            <label class="form-label fw-semibold" data-asistencia-titulo>Asistencia</label>
+            <input type="search" class="form-control form-control-sm mb-2" data-asistencia-search placeholder="Buscar bombero...">
+            <div class="unidad-asistencia-list border rounded p-2 overflow-auto" data-asistencia-list style="max-height: 220px;"></div>
+            <div class="text-end mt-2">
+                <button type="button" class="btn btn-sm btn-danger attendance-action-button" data-save-asistencia>
+                    <i class="bi bi-check-lg me-1"></i>Guardar asistencia
+                </button>
+            </div>
+        </div>
+        <div class="d-flex justify-content-between align-items-center gap-2 mt-2" data-asistencia-summary hidden>
+            <small class="text-success" data-asistencia-resumen></small>
+            <button type="button" class="btn btn-sm btn-outline-secondary attendance-action-button" data-edit-asistencia>
+                <i class="bi bi-pencil me-1"></i>Editar asistencia
+            </button>
+        </div>
+    </div>
+</template>
+{{ usuarios_asistencia|json_script:"salida-usuarios-asistencia" }}
+
+<!-- Modal Registrar Salida -->
+<div class="modal fade" id="createSalidaModal" tabindex="-1" aria-labelledby="createSalidaModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="createSalidaModalLabel">Registrar Nueva Salida a Terreno</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form id="createSalidaForm" method="post">
+                {% csrf_token %}
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label for="{{ form.motivo.id_for_label }}" class="form-label">Motivo de la Salida</label>
+                            {{ form.motivo }}
+                            {% for error in form.motivo.errors %}
+                                <div class="invalid-feedback d-block">{{ error }}</div>
+                            {% endfor %}
+                        </div>
+                        <div class="col-md-6">
+                            <label for="{{ form.direccion.id_for_label }}" class="form-label">Dirección</label>
+                            {{ form.direccion }}
+                            {% for error in form.direccion.errors %}
+                                <div class="invalid-feedback d-block">{{ error }}</div>
+                            {% endfor %}
+                        </div>
+                        <div class="col-md-6">
+                            <label for="{{ form.fecha_hora_salida.id_for_label }}" class="form-label">Fecha y Hora de Salida</label>
+                            {{ form.fecha_hora_salida }}
+                            {% for error in form.fecha_hora_salida.errors %}
+                                <div class="invalid-feedback d-block">{{ error }}</div>
+                            {% endfor %}
+                        </div>
+                        <div class="col-md-6">
+                            <label for="{{ form.fecha_hora_regreso.id_for_label }}" class="form-label">Fecha y Hora de Regreso (Opcional)</label>
+                            {{ form.fecha_hora_regreso }}
+                            {% for error in form.fecha_hora_regreso.errors %}
+                                <div class="invalid-feedback d-block">{{ error }}</div>
+                            {% endfor %}
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Unidades y asistencia</label>
+                            {{ form.asistencia_unidades }}
+                            <div id="createUnidadAsistenciaGroups" data-unidad-groups data-initial-units="{{ unidades_seleccionadas|join:',' }}"></div>
+                            <button type="button" class="btn btn-sm btn-outline-danger" data-add-unidad="createUnidadAsistenciaGroups">
+                                <i class="bi bi-plus-lg me-1"></i>Agregar otro carro
+                            </button>
+                            {% for error in form.unidades.errors %}
+                                <div class="invalid-feedback d-block">{{ error }}</div>
+                            {% endfor %}
+                            {% for error in form.asistencia_unidades.errors %}
+                                <div class="invalid-feedback d-block">{{ error }}</div>
+                            {% endfor %}
+                            <div class="form-text">Al elegir cada carro se abrirá su lista para marcar quién asistió en esa unidad.</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="createPersonalDropdownButton" class="form-label">Personal a Cargo</label>
+                            <input type="hidden" id="id_personal_a_cargo" name="personal_a_cargo" value="{{ form.personal_a_cargo.value|default:'' }}">
+                            <div class="dropdown salidas-personal-selector">
+                                <button class="form-select salidas-personal-toggle text-start d-flex justify-content-between align-items-center" type="button" id="createPersonalDropdownButton" data-bs-toggle="dropdown" aria-expanded="false">
+                                    <span id="createPersonalSelectedLabel" class="text-truncate">Seleccionar responsable</span>
+                                </button>
+                                <div class="dropdown-menu salidas-personal-menu w-100 overflow-auto" aria-labelledby="createPersonalDropdownButton" style="max-height: 280px;">
+                                    {% for choice in form.personal_a_cargo.field.choices %}
+                                        <button type="button" class="dropdown-item" data-personal-option data-personal-target="id_personal_a_cargo" data-personal-label="createPersonalSelectedLabel" data-personal-id="{{ choice.0 }}">{{ choice.1 }}</button>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            {% for error in form.personal_a_cargo.errors %}
+                                <div class="invalid-feedback d-block">{{ error }}</div>
+                            {% endfor %}
+                        </div>
+                        <div class="col-md-6">
+                            <label for="{{ form.kilometraje_salida.id_for_label }}" class="form-label">Kilometraje de Salida *</label>
+                            {{ form.kilometraje_salida }}
+                            {% for error in form.kilometraje_salida.errors %}
+                                <div class="invalid-feedback d-block">{{ error }}</div>
+                            {% endfor %}
+                        </div>
+                        <div class="col-md-6">
+                            <label for="{{ form.kilometraje_regreso.id_for_label }}" class="form-label">Kilometraje de Regreso *</label>
+                            {{ form.kilometraje_regreso }}
+                            {% for error in form.kilometraje_regreso.errors %}
+                                <div class="invalid-feedback d-block">{{ error }}</div>
+                            {% endfor %}
+                        </div>
+                        <div class="col-12">
+                            <label for="{{ form.descripcion.id_for_label }}" class="form-label">Reporte / Novedades</label>
+                            {{ form.descripcion }}
+                            {% for error in form.descripcion.errors %}
+                                <div class="invalid-feedback d-block">{{ error }}</div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button type="submit" class="btn btn-danger">Registrar</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Modal Editar Salida -->
+<div class="modal fade" id="editSalidaModal" tabindex="-1" aria-labelledby="editSalidaModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="editSalidaModalLabel">Editar Salida a Terreno</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form id="editSalidaForm" method="post">
+                {% csrf_token %}
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label for="edit_motivo" class="form-label">Motivo</label>
+                            <input type="text" id="edit_motivo" name="motivo" class="form-control">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="edit_direccion" class="form-label">Dirección</label>
+                            <input type="text" id="edit_direccion" name="direccion" class="form-control">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="edit_fecha_hora_salida" class="form-label">Fecha y Hora de Salida</label>
+                            <input type="datetime-local" id="edit_fecha_hora_salida" name="fecha_hora_salida" class="form-control">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="edit_fecha_hora_regreso" class="form-label">Fecha y Hora de Regreso</label>
+                            <input type="datetime-local" id="edit_fecha_hora_regreso" name="fecha_hora_regreso" class="form-control">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="edit_kilometraje_salida" class="form-label">Kilometraje de Salida *</label>
+                            <input type="number" id="edit_kilometraje_salida" name="kilometraje_salida" class="form-control" min="0" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="edit_kilometraje_regreso" class="form-label">Kilometraje de Regreso *</label>
+                            <input type="number" id="edit_kilometraje_regreso" name="kilometraje_regreso" class="form-control" min="0" required>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">Unidades y asistencia</label>
+                            <input type="hidden" id="edit_asistencia_unidades" name="asistencia_unidades" value="{}">
+                            <div id="editUnidadAsistenciaGroups" data-unidad-groups></div>
+                            <button type="button" class="btn btn-sm btn-outline-danger" data-add-unidad="editUnidadAsistenciaGroups">
+                                <i class="bi bi-plus-lg me-1"></i>Agregar otro carro
+                            </button>
+                            <div class="form-text">Al elegir cada carro se abrirá su lista para marcar quién asistió en esa unidad.</div>
+                        </div>
+                        
+                        <div class="col-12">
+                            <label for="editPersonalDropdownButton" class="form-label">Personal a Cargo</label>
+                            <input type="hidden" id="edit_personal_a_cargo" name="personal_a_cargo">
+                            <div class="dropdown salidas-personal-selector">
+                                <button class="form-select salidas-personal-toggle text-start d-flex justify-content-between align-items-center" type="button" id="editPersonalDropdownButton" data-bs-toggle="dropdown" aria-expanded="false">
+                                    <span id="editPersonalSelectedLabel" class="text-truncate">Seleccionar responsable</span>
+                                </button>
+                                <div class="dropdown-menu salidas-personal-menu w-100 overflow-auto" aria-labelledby="editPersonalDropdownButton" style="max-height: 280px;">
+                                    {% for choice in form.personal_a_cargo.field.choices %}
+                                        <button type="button" class="dropdown-item" data-personal-option data-personal-target="edit_personal_a_cargo" data-personal-label="editPersonalSelectedLabel" data-personal-id="{{ choice.0 }}">{{ choice.1 }}</button>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-12">
+                            <label for="edit_descripcion" class="form-label">Reporte / Novedades</label>
+                            <textarea id="edit_descripcion" name="descripcion" class="form-control" rows="4"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button type="submit" class="btn btn-danger">Guardar Cambios</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Modal Eliminar Salida -->
+<div class="modal fade" id="deleteSalidaModal" tabindex="-1" aria-labelledby="deleteSalidaModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="deleteSalidaModalLabel">Confirmar Eliminación</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>¿Estás seguro de que quieres eliminar la salida por "<strong><span id="salidaMotivoToDelete"></span></strong>"?</p>
+                <p class="text-danger small">Esta acción no se puede deshacer.</p>
+            </div>
+            <div class="modal-footer">
+                <form id="deleteSalidaForm" method="post">
+                    {% csrf_token %}
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button type="submit" class="btn btn-danger">Sí, eliminar</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ block.super }}
+<style>
+    .salidas-personal-toggle:focus {
+        border-color: #dc3545;
+        box-shadow: 0 0 0 .25rem rgba(220, 53, 69, .25);
+    }
+    .salidas-personal-menu .dropdown-item:hover,
+    .salidas-personal-menu .dropdown-item:focus {
+        color: #b02a37;
+        background-color: #fcebed;
+    }
+    .salidas-personal-menu .dropdown-item.active,
+    .salidas-personal-menu .dropdown-item[aria-selected="true"] {
+        color: #fff;
+        background-color: #dc3545;
+    }
+    .unidad-asistencia-select:focus {
+        border-color: #dc3545;
+        box-shadow: 0 0 0 .25rem rgba(220, 53, 69, .25);
+    }
+    .unidad-asistencia-list .form-check-input:checked {
+        background-color: #dc3545;
+        border-color: #dc3545;
+    }
+    .attendance-action-button {
+        width: 171px;
+        justify-content: center;
+    }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const asistentesDisponibles = JSON.parse(document.getElementById('salida-usuarios-asistencia').textContent);
+    const grupoUnidadTemplate = document.getElementById('unidadAsistenciaGroupTemplate');
+    const normalizarTexto = function (texto) {
+        return String(texto || '').toLocaleLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+    };
+
+    function syncAsistenciaUnidades(container) {
+        const hiddenInput = container.closest('form').querySelector('[name="asistencia_unidades"]');
+        const asistencia = {};
+        container.querySelectorAll('[data-unidad-asistencia]').forEach(function (group) {
+            const unidadId = group.querySelector('[data-unidad-select]').value;
+            if (!unidadId) return;
+            asistencia[unidadId] = Array.from(group.querySelectorAll('[data-asistente]:checked')).map(function (checkbox) {
+                return Number(checkbox.value);
+            });
+        });
+        hiddenInput.value = JSON.stringify(asistencia);
+    }
+
+    function refreshUnidadOptions(container) {
+        const selectedIds = Array.from(container.querySelectorAll('[data-unidad-select]'))
+            .map(function (select) { return select.value; })
+            .filter(Boolean);
+        container.querySelectorAll('[data-unidad-select]').forEach(function (select) {
+            Array.from(select.options).forEach(function (option) {
+                option.disabled = Boolean(option.value && selectedIds.includes(option.value) && select.value !== option.value);
+            });
+        });
+        container.querySelectorAll('[data-remove-unidad]').forEach(function (button) {
+            button.hidden = container.querySelectorAll('[data-unidad-asistencia]').length <= 1;
+        });
+    }
+
+    function filtrarAsistenciaGroup(group) {
+        const search = normalizarTexto(group.querySelector('[data-asistencia-search]').value);
+        const rows = Array.from(group.querySelectorAll('[data-asistente-row]'));
+        let coincidencias = 0;
+        rows.forEach(function (row) {
+            const bloqueado = row.dataset.asignadoOtraUnidad === 'true';
+            const coincide = !bloqueado && row.dataset.searchText.includes(search);
+            row.classList.toggle('d-none', !coincide);
+            if (coincide) coincidencias++;
+        });
+        const mensaje = group.querySelector('[data-asistencia-sin-resultados]');
+        if (mensaje) {
+            mensaje.textContent = rows.length === 0
+                ? 'No hay bomberos activos.'
+                : (search ? 'No se encontraron bomberos disponibles.' : 'Todos los bomberos ya están asignados a otro carro.');
+            mensaje.classList.toggle('d-none', coincidencias > 0);
+        }
+    }
+
+    function refreshAsistenciaOptions(container) {
+        const asignadosA = new Map();
+        container.querySelectorAll('[data-unidad-asistencia]').forEach(function (group) {
+            const unidadId = group.querySelector('[data-unidad-select]').value;
+            if (!unidadId) return;
+            group.querySelectorAll('[data-asistente]:checked').forEach(function (checkbox) {
+                if (!asignadosA.has(checkbox.value)) asignadosA.set(checkbox.value, unidadId);
+            });
+        });
+
+        container.querySelectorAll('[data-unidad-asistencia]').forEach(function (group) {
+            const unidadId = group.querySelector('[data-unidad-select]').value;
+            group.querySelectorAll('[data-asistente-row]').forEach(function (row) {
+                const checkbox = row.querySelector('[data-asistente]');
+                const otraUnidadId = asignadosA.get(checkbox.value);
+                const bloqueado = Boolean(otraUnidadId && otraUnidadId !== unidadId);
+                if (bloqueado && checkbox.checked) checkbox.checked = false;
+                checkbox.disabled = bloqueado;
+                row.dataset.asignadoOtraUnidad = bloqueado ? 'true' : 'false';
+            });
+            filtrarAsistenciaGroup(group);
+        });
+    }
+
+    function updateAsistenciaSummary(group) {
+        const count = group.querySelectorAll('[data-asistente]:checked').length;
+        group.querySelector('[data-asistencia-resumen]').textContent =
+            'Asistencia guardada: ' + count + (count === 1 ? ' bombero' : ' bomberos');
+        group.querySelector('[data-asistencia-summary]').hidden = false;
+    }
+
+    function populateAsistencia(group, selectedIds, collapseAfterLoad = false) {
+        const container = group.closest('[data-unidad-groups]');
+        const select = group.querySelector('[data-unidad-select]');
+        const unidadId = select.value;
+        const panel = group.querySelector('[data-asistencia-panel]');
+        const list = group.querySelector('[data-asistencia-list]');
+        const oldUnitInput = group.querySelector('input[name="unidades"]');
+        if (oldUnitInput) oldUnitInput.remove();
+        list.replaceChildren();
+        group.querySelector('[data-asistencia-summary]').hidden = true;
+        if (!unidadId) {
+            panel.hidden = true;
+            refreshUnidadOptions(container);
+            refreshAsistenciaOptions(container);
+            syncAsistenciaUnidades(container);
+            return;
+        }
+
+        const option = select.options[select.selectedIndex];
+        group.querySelector('[data-asistencia-titulo]').textContent = 'Asistencia en ' + option.textContent.trim();
+        panel.hidden = false;
+        const unitInput = document.createElement('input');
+        unitInput.type = 'hidden';
+        unitInput.name = 'unidades';
+        unitInput.value = unidadId;
+        group.appendChild(unitInput);
+
+        asistentesDisponibles.forEach(function (usuario) {
+            const wrapper = document.createElement('label');
+            wrapper.className = 'form-check d-flex align-items-center gap-2 py-1 m-0';
+            wrapper.dataset.asistenteRow = '';
+            wrapper.dataset.searchText = normalizarTexto(usuario.nombre);
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.className = 'form-check-input mt-0';
+            checkbox.value = usuario.id;
+            checkbox.dataset.asistente = '';
+            checkbox.checked = selectedIds.includes(Number(usuario.id));
+            checkbox.addEventListener('change', function () {
+                group.querySelector('[data-asistencia-summary]').hidden = true;
+                refreshAsistenciaOptions(container);
+                syncAsistenciaUnidades(container);
+            });
+            const name = document.createElement('span');
+            name.textContent = usuario.nombre;
+            wrapper.append(checkbox, name);
+            list.appendChild(wrapper);
+        });
+        const sinResultados = document.createElement('div');
+        sinResultados.className = 'd-none text-muted small p-2';
+        sinResultados.dataset.asistenciaSinResultados = '';
+        sinResultados.textContent = 'No se encontraron bomberos.';
+        list.appendChild(sinResultados);
+        refreshUnidadOptions(container);
+        refreshAsistenciaOptions(container);
+        syncAsistenciaUnidades(container);
+        if (collapseAfterLoad) {
+            panel.hidden = true;
+            updateAsistenciaSummary(group);
+        }
+    }
+
+    function addUnidadGroup(container, unidadId, asistentes = [], collapseAfterLoad = false) {
+        const group = grupoUnidadTemplate.content.firstElementChild.cloneNode(true);
+        container.appendChild(group);
+        const select = group.querySelector('[data-unidad-select]');
+        if (unidadId) select.value = String(unidadId);
+        select.addEventListener('change', function () { populateAsistencia(group, []); });
+        group.querySelector('[data-save-asistencia]').addEventListener('click', function () {
+            syncAsistenciaUnidades(container);
+            group.querySelector('[data-asistencia-panel]').hidden = true;
+            updateAsistenciaSummary(group);
+        });
+        group.querySelector('[data-edit-asistencia]').addEventListener('click', function () {
+            group.querySelector('[data-asistencia-summary]').hidden = true;
+            group.querySelector('[data-asistencia-panel]').hidden = false;
+            group.querySelector('[data-asistencia-search]').focus();
+        });
+        group.querySelector('[data-remove-unidad]').addEventListener('click', function () {
+            group.remove();
+            if (!container.querySelector('[data-unidad-asistencia]')) addUnidadGroup(container);
+            refreshUnidadOptions(container);
+            refreshAsistenciaOptions(container);
+            syncAsistenciaUnidades(container);
+        });
+        group.querySelector('[data-asistencia-search]').addEventListener('input', function (event) {
+            filtrarAsistenciaGroup(group);
+        });
+        populateAsistencia(group, asistentes.map(Number), collapseAfterLoad);
+    }
+
+    document.querySelectorAll('[data-add-unidad]').forEach(function (button) {
+        button.addEventListener('click', function () {
+            addUnidadGroup(document.getElementById(button.dataset.addUnidad));
+        });
+    });
+
+    const createUnidadGroups = document.getElementById('createUnidadAsistenciaGroups');
+    const initialCreateAttendanceRaw = document.getElementById('id_asistencia_unidades').value;
+    let initialCreateAttendance = {};
+    try { initialCreateAttendance = JSON.parse(initialCreateAttendanceRaw || '{}'); } catch (error) { initialCreateAttendance = {}; }
+    const initialCreateUnits = createUnidadGroups.dataset.initialUnits.split(',').filter(Boolean);
+    if (initialCreateUnits.length) {
+        initialCreateUnits.forEach(function (unidadId) {
+            addUnidadGroup(createUnidadGroups, unidadId, initialCreateAttendance[unidadId] || []);
+        });
+    } else {
+        addUnidadGroup(createUnidadGroups);
+    }
+
+    function setPersonalSelection(inputId, labelId, selectedId) {
+        const input = document.getElementById(inputId);
+        const label = document.getElementById(labelId);
+        if (!input || !label) return;
+        input.value = selectedId || '';
+        const options = document.querySelectorAll('[data-personal-target="' + inputId + '"]');
+        let selectedOption = null;
+        options.forEach(function (option) {
+            const isSelected = option.dataset.personalId === String(selectedId || '');
+            option.classList.toggle('active', isSelected && Boolean(selectedId));
+            option.setAttribute('aria-selected', isSelected && Boolean(selectedId) ? 'true' : 'false');
+            if (isSelected) selectedOption = option;
+        });
+        label.textContent = selectedOption && selectedId ? selectedOption.textContent.trim() : 'Seleccionar responsable';
+        label.title = label.textContent;
+    }
+
+    document.querySelectorAll('[data-personal-option]').forEach(function (option) {
+        option.addEventListener('click', function () {
+            setPersonalSelection(option.dataset.personalTarget, option.dataset.personalLabel, option.dataset.personalId);
+            const toggle = option.closest('.dropdown').querySelector('[data-bs-toggle="dropdown"]');
+            bootstrap.Dropdown.getOrCreateInstance(toggle).hide();
+        });
+    });
+
+    setPersonalSelection('id_personal_a_cargo', 'createPersonalSelectedLabel', document.getElementById('id_personal_a_cargo')?.value);
+
+    // Si hay errores en el formulario de creación, reabrir el modal.
+    {% if form.errors %}
+        var createSalidaModal = new bootstrap.Modal(document.getElementById('createSalidaModal'));
+        createSalidaModal.show();
+    {% endif %}
+
+    // Lógica para el modal de edición
+    var editModal = document.getElementById('editSalidaModal');
+    editModal.addEventListener('show.bs.modal', function (event) {
+        var button = event.relatedTarget;
+        var form = document.getElementById('editSalidaForm');
+        form.action = `/salidas/${button.dataset.salidaId}/edit/`;
+        form.querySelector('#edit_motivo').value = button.dataset.salidaMotivo;
+        form.querySelector('#edit_direccion').value = button.dataset.salidaDireccion;
+        form.querySelector('#edit_fecha_hora_salida').value = button.dataset.salidaFecha_hora_salida;
+        form.querySelector('#edit_fecha_hora_regreso').value = button.dataset.salidaFecha_hora_regreso;
+        const editUnidadGroups = document.getElementById('editUnidadAsistenciaGroups');
+        editUnidadGroups.replaceChildren();
+        let asistenciaGuardada = {};
+        try { asistenciaGuardada = JSON.parse(button.dataset.salidaAsistencia || '{}'); } catch (error) { asistenciaGuardada = {}; }
+        const selectedUnits = (button.dataset.salidaUnidades || '').split(',').filter(Boolean);
+        if (selectedUnits.length) {
+            selectedUnits.forEach(function (unidadId) {
+                addUnidadGroup(editUnidadGroups, unidadId, asistenciaGuardada[unidadId] || [], true);
+            });
+        } else {
+            addUnidadGroup(editUnidadGroups);
+        }
+        form.querySelector('#edit_kilometraje_salida').value = button.dataset.salidaKilometraje_salida;
+        form.querySelector('#edit_kilometraje_regreso').value = button.dataset.salidaKilometraje_regreso;
+        setPersonalSelection('edit_personal_a_cargo', 'editPersonalSelectedLabel', button.dataset.salidaPersonal_a_cargo);
+        form.querySelector('#edit_descripcion').value = button.dataset.salidaDescripcion;
+    });
+
+    // Lógica para el modal de eliminación
+    var deleteModal = document.getElementById('deleteSalidaModal');
+    deleteModal.addEventListener('show.bs.modal', function (event) {
+        var button = event.relatedTarget;
+        var form = document.getElementById('deleteSalidaForm');
+        form.action = `/salidas/${button.dataset.salidaId}/delete/`;
+        document.getElementById('salidaMotivoToDelete').textContent = button.dataset.salidaMotivo;
+    });
+
+    // --- Lógica de Filtrado en Tiempo Real para Salidas ---
+    const salidaSearchInput = document.getElementById('salidaSearchInput');
+    const salidaUserFilter = document.getElementById('salidaUserFilter');
+    const salidasTableBody = document.getElementById('salidasTableBody');
+    const noSalidasRow = document.getElementById('no-salidas-found');
+
+    function filterSalidas() {
+        if (!salidasTableBody) return;
+        const searchText = salidaSearchInput.value.toLowerCase();
+        const isUserSelected = salidaUserFilter.value !== "";
+        const selectedUserText = salidaUserFilter.options[salidaUserFilter.selectedIndex].text.toLowerCase();
+
+        const rows = salidasTableBody.querySelectorAll('tr:not(#no-salidas-found)');
+        let visibleRows = 0;
+
+        rows.forEach(row => {
+            if (row.children.length === 1 && row.textContent.includes('No hay salidas registradas todavía')) return;
+
+            const textContent = row.textContent.toLowerCase();
+            const userCell = row.cells[5] ? row.cells[5].textContent.toLowerCase() : "";
+            const matchesSearch = searchText === "" || textContent.includes(searchText);
+            const matchesUser = !isUserSelected || userCell.includes(selectedUserText) || selectedUserText === "todos";
+
+            if (matchesSearch && matchesUser) { row.style.display = ""; visibleRows++; } 
+            else { row.style.display = "none"; }
+        });
+        if (noSalidasRow) noSalidasRow.style.display = visibleRows === 0 && rows.length > 0 ? "" : "none";
+    }
+
+    if (salidaSearchInput) salidaSearchInput.addEventListener('keyup', filterSalidas);
+    if (salidaUserFilter) salidaUserFilter.addEventListener('change', filterSalidas);
+});
+</script>
+{% endblock %}

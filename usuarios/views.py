@@ -1,0 +1,3552 @@
+from django.shortcuts import render, redirect, get_object_or_404
+from django.urls import reverse
+from django.contrib.auth import login, authenticate, logout
+from django.contrib.auth.decorators import login_required
+from django.core.paginator import Paginator
+from django.contrib import messages
+from django.contrib.auth import update_session_auth_hash
+from django.utils.html import escape
+from django.db import IntegrityError, transaction
+from django.db.models import Sum, Case, When, DecimalField, F, Q, Count, Prefetch
+from django.utils import timezone
+from django.db.models.functions import TruncDay
+from datetime import datetime, timedelta
+import json, re
+import random
+import secrets
+from io import BytesIO
+from django.core.files.base import ContentFile
+from django.http import HttpResponse, JsonResponse
+from django.core.mail import EmailMultiAlternatives, send_mail
+from django.conf import settings
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+import openpyxl
+from reportlab.lib.units import inch
+from .forms import RegistroForm, LoginForm, ProyectoForm, ArchivoProyectoForm, DocumentoForm, CarpetaForm, SalidaTerrenoForm, EmergenciaForm, PerfilForm, PasswordChangeForm, CapacitacionForm, ReunionForm, MantenimientoForm, ArchivoMantenimientoForm, InventarioForm, CajaChicaForm, AdminUserCreationForm, AdminUserChangeForm, RolForm, CompaniaForm, InventarioEditForm, InventarioGroupEditForm, AvisoForm, PasswordResetRequestForm, PasswordResetVerifyForm, PasswordResetNewPasswordForm, VehiculoForm, VehiculoHojaVidaForm, VehiculoDocumentacionForm, RondaVehiculoForm
+from .models import Rol, Compania, Proyecto, ArchivoProyecto, Documento, Carpeta, SalidaTerreno, SalidaTerrenoUnidad, Emergencia, EmergenciaUnidad, Usuario, Capacitacion, CursoMalla, Mantenimiento, ArchivoMantenimiento, Inventario, CajaChica, Notificacion, Aviso, AvisoDestinatario, PasswordResetCode, RegistroPendiente, Vehiculo, RondaVehiculo
+from .decorators import admin_required, permiso_requerido, pertenencia_compania
+from .inventory_permissions import (
+    puede_acceder_inventario_compania,
+    puede_editar_inventario,
+    puede_gestionar_inventario_global,
+)
+import logging
+
+logger = logging.getLogger('usuarios')
+
+def _enviar_codigo_registro(registro):
+    nombre = escape(registro.nombre)
+    html_message = f'''\
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="UTF-8"></head>
+    <body style="margin:0; padding:0; background-color:#f4f4f7; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f7; padding:40px 0;">
+            <tr><td align="center">
+                <table width="500" cellpadding="0" cellspacing="0" style="background:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,0.08);">
+                    <tr><td style="background:linear-gradient(135deg,#dc3545,#c82333); padding:30px 40px; text-align:center;">
+                        <img src="/static/usuarios/demo-logo.svg" alt="Logo Bomberos Demo" style="max-width:100px; border-radius:8px; margin-bottom:10px;">
+                        <h2 style="color:#ffffff; margin:10px 0 0; font-size:20px; font-weight:600;">Compañía de Bomberos Demo</h2>
+                    </td></tr>
+                    <tr><td style="padding:40px;">
+                        <h1 style="color:#212529; font-size:24px; text-align:center; margin:0 0 10px;">Código de Verificación</h1>
+                        <p style="color:#6c757d; font-size:14px; text-align:center; margin:0 0 30px; line-height:1.6;">
+                            Hola <strong>{nombre}</strong>, ingresa este código para verificar tu correo y completar la creación de tu cuenta.
+                        </p>
+                        <table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">
+                            <div style="background:#f8f9fa; border:2px dashed #dc3545; border-radius:12px; padding:20px 30px; display:inline-block;">
+                                <span style="font-size:36px; font-weight:700; letter-spacing:12px; color:#dc3545; font-family:monospace;">{registro.codigo}</span>
+                            </div>
+                        </td></tr></table>
+                        <p style="color:#6c757d; font-size:13px; text-align:center; margin:25px 0 0; line-height:1.6;">
+                            Este código es válido por <strong>15 minutos</strong> y permite hasta 5 intentos.<br>
+                            Si no solicitaste esta cuenta, puedes ignorar este correo con total seguridad.
+                        </p>
+                    </td></tr>
+                    <tr><td style="background:#f8f9fa; padding:20px 40px; text-align:center; border-top:1px solid #e9ecef;">
+                        <p style="color:#adb5bd; font-size:12px; margin:0;">Sistema de Gestión de Bomberos &copy; 2026<br>Este es un correo automático, por favor no responder.</p>
+                    </td></tr>
+                </table>
+            </td></tr>
+        </table>
+    </body>
+    </html>
+    '''
+    enviados = send_mail(
+        'Código de Verificación - Sistema Bomberos',
+        (
+            f"Hola {registro.nombre},\n\n"
+            f"Tu código para verificar el correo y crear tu cuenta es: {registro.codigo}\n\n"
+            "El código es válido por 15 minutos y permite hasta 5 intentos.\n"
+            "Si no solicitaste esta cuenta, puedes ignorar este mensaje."
+        ),
+        settings.DEFAULT_FROM_EMAIL,
+        [registro.email],
+        fail_silently=False,
+        html_message=html_message,
+    )
+    if enviados != 1:
+        raise RuntimeError('El servidor de correo no confirmó el envío del código.')
+
+
+def _limpiar_registros_pendientes_expirados():
+    limite = timezone.now() - timedelta(minutes=15)
+    for registro in RegistroPendiente.objects.filter(creado_en__lt=limite).iterator():
+        if registro.foto_perfil:
+            registro.foto_perfil.delete(save=False)
+        registro.delete()
+
+
+def registro_view(request):
+    _limpiar_registros_pendientes_expirados()
+    if request.method == 'POST':
+        form = RegistroForm(request.POST, request.FILES)
+        if form.is_valid():
+            user = form.save(commit=False)
+            email = form.cleaned_data['email'].strip()
+            anterior = RegistroPendiente.objects.filter(email__iexact=email).first()
+            if anterior:
+                if anterior.foto_perfil:
+                    anterior.foto_perfil.delete(save=False)
+                anterior.delete()
+
+            registro = RegistroPendiente(
+                email=email,
+                nombre=user.nombre,
+                apellido=user.apellido,
+                rut=user.rut,
+                clave_radial=user.clave_radial,
+                compania=user.compania,
+                password=user.password,
+                codigo=f"{secrets.randbelow(900000) + 100000}",
+                foto_perfil=form.cleaned_data.get('foto_perfil'),
+            )
+            registro.save()
+            try:
+                _enviar_codigo_registro(registro)
+            except Exception:
+                logger.exception('No se pudo enviar el código de verificación de registro a %s', email)
+                if registro.foto_perfil:
+                    registro.foto_perfil.delete(save=False)
+                registro.delete()
+                messages.error(request, 'No se pudo enviar el correo de verificación. Revisa tu dirección e inténtalo nuevamente.')
+            else:
+                request.session['registro_pendiente_email'] = email
+                request.session.set_expiry(30 * 60)
+                messages.success(request, 'Te enviamos un código de verificación. Ingrésalo para completar tu registro.')
+                return redirect('registro_verificar')
+        else:
+            messages.error(request, 'Por favor, corrige los errores en el formulario.')
+    else:
+        form = RegistroForm()
+    
+    return render(request, 'usuarios/registro.html', {'form': form})
+
+
+def registro_verificar_view(request):
+    email = request.session.get('registro_pendiente_email')
+    if not email:
+        return redirect('registro')
+
+    registro = RegistroPendiente.objects.filter(email=email).first()
+    if not registro:
+        request.session.pop('registro_pendiente_email', None)
+        messages.error(request, 'La solicitud de registro ya no está disponible. Completa el formulario nuevamente.')
+        return redirect('registro')
+
+    codigo_ingresado = ''
+    error = None
+    if request.method == 'POST':
+        if request.POST.get('accion') == 'reenviar':
+            registro.codigo = f"{secrets.randbelow(900000) + 100000}"
+            registro.creado_en = timezone.now()
+            registro.intentos = 0
+            registro.save(update_fields=['codigo', 'creado_en', 'intentos'])
+            try:
+                _enviar_codigo_registro(registro)
+            except Exception:
+                logger.exception('No se pudo reenviar el código de verificación de registro a %s', email)
+                messages.error(request, 'No se pudo reenviar el código. Inténtalo nuevamente.')
+            else:
+                messages.success(request, 'Enviamos un nuevo código a tu correo. El código anterior dejó de ser válido.')
+            return redirect('registro_verificar')
+
+        codigo_ingresado = request.POST.get('codigo', '').strip()
+        if not re.fullmatch(r'\d{6}', codigo_ingresado):
+            error = 'Ingresa el código de 6 dígitos que enviamos a tu correo.'
+        elif not registro.is_valid() or registro.intentos >= 5:
+            error = 'El código venció o superaste los intentos permitidos. Puedes solicitar uno nuevo.'
+        else:
+            registro.intentos += 1
+            registro.save(update_fields=['intentos'])
+            if registro.codigo != codigo_ingresado:
+                error = f'El código no es correcto. Intento {registro.intentos} de 5.'
+            else:
+                identificador_ya_usado = Usuario.objects.filter(
+                    Q(email__iexact=registro.email) | Q(rut=registro.rut)
+                ).exists()
+                if identificador_ya_usado:
+                    if registro.foto_perfil:
+                        registro.foto_perfil.delete(save=False)
+                    registro.delete()
+                    request.session.pop('registro_pendiente_email', None)
+                    messages.success(request, 'Correo verificado. Si la solicitud procede, quedará pendiente de aprobación administrativa.')
+                    return redirect('login')
+                try:
+                    with transaction.atomic():
+                        registro = RegistroPendiente.objects.select_for_update().get(pk=registro.pk)
+                        if not registro.is_valid() or registro.codigo != codigo_ingresado:
+                            raise ValueError('El código venció o ya no es válido.')
+                        user = Usuario(
+                            email=registro.email,
+                            nombre=registro.nombre,
+                            apellido=registro.apellido,
+                            rut=registro.rut,
+                            clave_radial=registro.clave_radial,
+                            compania=registro.compania,
+                            password=registro.password,
+                            is_active=False,
+                        )
+                        user.rol, _ = Rol.objects.get_or_create(
+                            nombre='Usuario',
+                            defaults={'descripcion': 'Usuario estándar del sistema'}
+                        )
+                        user.save()
+
+                        if registro.foto_perfil:
+                            registro.foto_perfil.open('rb')
+                            foto = ContentFile(registro.foto_perfil.read())
+                            registro.foto_perfil.close()
+                            nombre_archivo = registro.foto_perfil.name.rsplit('/', 1)[-1]
+                            user.foto_perfil.save(nombre_archivo, foto, save=True)
+                            registro.foto_perfil.delete(save=False)
+
+                        admins = Usuario.objects.filter(is_superuser=True)
+                        Notificacion.objects.bulk_create([
+                            Notificacion(
+                                usuario=admin,
+                                mensaje=f"Nueva solicitud de registro: {user.get_full_name()}",
+                                link="/administracion/?tab=requests"
+                            ) for admin in admins
+                        ])
+                        registro.delete()
+                except ValueError as exc:
+                    error = str(exc)
+                except IntegrityError:
+                    logger.exception('No se pudo crear la cuenta verificada para %s', email)
+                    registro_error = RegistroPendiente.objects.filter(email=email).first()
+                    if registro_error:
+                        if registro_error.foto_perfil:
+                            registro_error.foto_perfil.delete(save=False)
+                        registro_error.delete()
+                    messages.success(request, 'Correo verificado. Si la solicitud procede, quedará pendiente de aprobación administrativa.')
+                    request.session.pop('registro_pendiente_email', None)
+                    return redirect('login')
+                else:
+                    request.session.pop('registro_pendiente_email', None)
+                    messages.success(request, 'Correo verificado. Si la solicitud procede, quedará pendiente de aprobación administrativa.')
+                    return redirect('login')
+
+    return render(request, 'usuarios/registro_verificar.html', {
+        'correo_destino': email,
+        'codigo': codigo_ingresado,
+        'error_verificacion': error,
+        'codigo_expirado': not registro.is_valid() or registro.intentos >= 5,
+    })
+
+def login_view(request):
+    if request.method == 'POST':
+        form = LoginForm(request, data=request.POST)
+        if form.is_valid():
+            email = form.cleaned_data.get('username')
+            password = form.cleaned_data.get('password')
+            user = authenticate(request, email=email, password=password)
+            
+            if user is not None:
+                login(request, user)
+                messages.success(request, f'¡Bienvenido {user.get_full_name()}!')
+                return redirect('dashboard')
+            else:
+                messages.error(request, 'Credenciales inválidas')
+        else:
+            messages.error(request, 'Por favor corrige los errores')
+    else:
+        form = LoginForm()
+    
+    return render(request, 'usuarios/login.html', {'form': form})
+
+def logout_view(request):
+    logout(request)
+    messages.info(request, 'Has cerrado sesión exitosamente.')
+    return redirect('login')
+
+def verificar_recordatorios_mantenimiento():
+    from django.core.cache import cache
+    from django.utils import timezone
+    from django.urls import reverse
+    from .models import Mantenimiento, Notificacion, Usuario
+    
+    today_date = timezone.now().date()
+    last_run = cache.get('maintenance_reminders_last_run')
+    
+    if last_run == today_date:
+        return
+        
+    pendientes = Mantenimiento.objects.exclude(estado='Finalizado')
+    administradores = Usuario.objects.filter(is_superuser=True)
+    
+    for mant in pendientes:
+        dias_restantes = (mant.fecha - today_date).days
+        
+        if dias_restantes in [7, 4, 2, 0]:
+            if dias_restantes == 0:
+                mensaje = f"Recordatorio: Mantenimiento para '{mant.vehiculo}' es HOY."
+            else:
+                mensaje = f"Recordatorio: Faltan {dias_restantes} días para el mantenimiento de '{mant.vehiculo}'."
+                
+            try:
+                link_url = reverse('mantenimiento')
+            except:
+                link_url = ''
+                
+            for admin in administradores:
+                already_notified = Notificacion.objects.filter(
+                    usuario=admin, 
+                    mensaje=mensaje, 
+                    fecha_creacion__date=today_date
+                ).exists()
+                
+                if not already_notified:
+                    Notificacion.objects.create(
+                        usuario=admin,
+                        mensaje=mensaje,
+                        link=link_url
+                    )
+                    
+    cache.set('maintenance_reminders_last_run', today_date, 60*60*12)
+
+@login_required
+def dashboard_view(request):
+    # Ejecutar la verificación de recordatorios (silencioso y cacheados)
+    verificar_recordatorios_mantenimiento()
+    
+    modules = [
+        {'id': 'dashboard_summary', 'url_name': 'dashboard_summary', 'icon': 'bi-bar-chart-line-fill', 'title': 'Ver Resumen General', 'desc': 'Visualiza KPIs, gráficos y actividad reciente del sistema.'},
+        {'id': 'documentos', 'url_name': 'documentos', 'icon': 'bi-file-earmark-text-fill', 'title': 'Documentos', 'desc': 'Gestión de documentos e informes'},
+        {'id': 'inventario', 'url_name': 'inventario', 'icon': 'bi-box-seam-fill', 'title': 'Inventario', 'desc': 'Control de equipos y herramientas'},
+        {'id': 'salidas', 'url_name': 'salidas_terreno', 'icon': 'bi-truck-front-fill', 'title': 'Salidas a Terreno', 'desc': 'Registro y seguimiento de operaciones'},
+        {'id': 'emergencias', 'url_name': 'emergencias', 'icon': 'bi-exclamation-octagon-fill', 'title': 'Emergencias', 'desc': 'Gestión de incidentes y respuesta'},
+        {'id': 'capacitaciones', 'url_name': 'capacitaciones', 'icon': 'bi-mortarboard-fill', 'title': 'Cursos y Capacitaciones', 'desc': 'Programación y seguimiento de cursos y entrenamientos'},
+        {'id': 'mantenimiento', 'url_name': 'mantenimiento', 'icon': 'bi-wrench-adjustable-circle-fill', 'title': 'Mantenimiento', 'desc': 'Gestión de la flota vehicular'},
+        {'id': 'caja_chica', 'url_name': 'caja_chica', 'icon': 'bi-wallet-fill', 'title': 'Caja', 'desc': 'Control de gastos menores'},
+        {'id': 'proyectos', 'url_name': 'proyectos', 'icon': 'bi-graph-up-arrow', 'title': 'Proyectos', 'desc': 'Seguimiento de proyectos y mejoras'},
+        {'id': 'scan_qr', 'url_name': 'scan_qr_page', 'icon': 'bi-qr-code-scan', 'title': 'Escanear QR', 'desc': 'Identifica un ítem de inventario usando su código QR.'},
+        {'id': 'inspectores', 'url_name': 'inspectores', 'icon': 'bi-search', 'title': 'Inspectores', 'desc': 'Documentos y archivos exclusivos de inspectores'},
+        {'id': 'administracion', 'url_name': 'administracion', 'icon': 'bi-gear-fill', 'title': 'Administración', 'desc': 'Configuración y gestión de usuarios'},
+    ]
+
+    # Filtrar módulos basados en los permisos del usuario
+    if request.user.is_superuser:
+        filtered_modules = list(modules)
+        if not (hasattr(request.user, 'rol') and request.user.rol and request.user.rol.ver_inspectores):
+            filtered_modules = [m for m in filtered_modules if m['id'] != 'inspectores']
+    else:
+        filtered_modules = []
+        rol = request.user.rol
+        for m in modules:
+            # Modulos estrictamente para superusuario
+            if m['id'] in ['administracion']:
+                if rol and rol.ver_avisos:
+                    filtered_modules.append(m)
+                continue
+            
+            if m['id'] == 'inspectores':
+                if rol and rol.ver_inspectores:
+                    filtered_modules.append(m)
+                continue
+            
+            # Módulos controlados mediante los permisos configurados en el Rol
+            if rol:
+                if m['id'] == 'dashboard_summary' and rol.ver_resumen_general: filtered_modules.append(m)
+                elif m['id'] == 'documentos' and rol.ver_documentacion: filtered_modules.append(m)
+                elif m['id'] == 'inventario' and rol.ver_inventario: filtered_modules.append(m)
+                elif m['id'] == 'salidas' and rol.ver_salidas_terreno: filtered_modules.append(m)
+                elif m['id'] == 'emergencias' and rol.ver_emergencias: filtered_modules.append(m)
+                elif m['id'] == 'capacitaciones' and rol.ver_capacitaciones: filtered_modules.append(m)
+                elif m['id'] == 'mantenimiento' and rol.ver_mantenimientos: filtered_modules.append(m)
+                elif m['id'] == 'caja_chica' and rol.ver_caja_chica: filtered_modules.append(m)
+                elif m['id'] == 'scan_qr' and rol.ver_escanear_qr: filtered_modules.append(m)
+                elif m['id'] == 'proyectos' and rol.ver_proyectos: filtered_modules.append(m)
+
+    # Obtener los avisos para el usuario actual
+    avisos_usuario = AvisoDestinatario.objects.filter(
+        usuario=request.user
+    ).select_related('aviso', 'aviso__creado_por').order_by('-aviso__fecha_creacion')[:10]
+
+    context = {
+        'modules': filtered_modules,
+        'avisos_usuario': avisos_usuario,
+    }
+    return render(request, 'usuarios/inicio.html', context)
+
+@login_required
+def dashboard_summary_view(request):
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.ver_resumen_general):
+        messages.error(request, 'No tienes permiso para acceder al Resumen General.')
+        return redirect('dashboard')
+
+    # --- KPIs / Tarjetas de Resumen ---
+    total_users = Usuario.objects.count()
+    total_budget = Proyecto.objects.aggregate(total=Sum('presupuesto'))['total'] or 0
+    now = timezone.now()
+    start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    emergencies_this_month = Emergencia.objects.filter(fecha_hora_alarma__gte=start_of_month).count()
+
+    # --- Lógica de Filtro para Caja ---
+    caja_chica_qs = CajaChica.objects.all()
+    nombre_caja = "Global" # Título por defecto
+    filtro_compania_caja = 'todas'
+
+    if request.user.is_superuser:
+        filtro_compania_caja = request.GET.get('compania_caja', 'todas')
+        if filtro_compania_caja == 'general':
+            caja_chica_qs = caja_chica_qs.filter(compania__isnull=True)
+            nombre_caja = "Caja General"
+        elif filtro_compania_caja != 'todas' and filtro_compania_caja.isdigit():
+            caja_chica_qs = caja_chica_qs.filter(compania_id=filtro_compania_caja)
+            try:
+                nombre_caja = Compania.objects.get(id=filtro_compania_caja).nombre
+            except Compania.DoesNotExist:
+                nombre_caja = "Desconocida"
+        else:
+            nombre_caja = "Todas las Cajas"
+    else: # Usuario no-admin
+        filtro_compania_caja = None
+        if request.user.compania:
+            caja_chica_qs = caja_chica_qs.filter(compania=request.user.compania)
+            nombre_caja = request.user.compania.nombre
+        else:
+            caja_chica_qs = CajaChica.objects.none()
+            nombre_caja = "Sin Compañía"
+
+    saldo_caja_chica = caja_chica_qs.aggregate(
+        saldo=Sum(Case(When(tipo='Ingreso', then=F('monto')), When(tipo='Egreso', then=-F('monto')), output_field=DecimalField()))
+    )['saldo'] or 0.00
+    # --- Datos para Gráfico de Emergencias (Dona) ---
+    emergencias_por_tipo = Emergencia.objects.values('tipo').annotate(count=Count('id')).order_by('-count')
+    emergencia_labels = [item['tipo'] for item in emergencias_por_tipo]
+    emergencia_data = [item['count'] for item in emergencias_por_tipo]
+
+    # --- Datos para Gráfico de Caja (Líneas) ---
+    today = timezone.now()
+    start_date = (today - timedelta(days=29)).replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # Generar todas las fechas de los últimos 30 días
+    date_range = [start_date + timedelta(days=x) for x in range(30)]
+    caja_chica_labels = [d.strftime('%d/%m') for d in date_range]
+
+    # Obtener datos de ingresos y egresos (agrupados en memoria para evitar errores de CONVERT_TZ en MySQL)
+    ingresos_qs = caja_chica_qs.filter(tipo='Ingreso', fecha__gte=start_date)
+    egresos_qs = caja_chica_qs.filter(tipo='Egreso', fecha__gte=start_date)
+
+    ingresos_map = {}
+    for item in ingresos_qs:
+        day_val = item.fecha.date() if hasattr(item.fecha, 'date') else item.fecha
+        ingresos_map[day_val] = float(ingresos_map.get(day_val, 0)) + float(item.monto)
+
+    egresos_map = {}
+    for item in egresos_qs:
+        day_val = item.fecha.date() if hasattr(item.fecha, 'date') else item.fecha
+        egresos_map[day_val] = float(egresos_map.get(day_val, 0)) + float(item.monto)
+
+    caja_chica_ingresos = [float(ingresos_map.get(d.date(), 0)) for d in date_range]
+    caja_chica_egresos = [float(egresos_map.get(d.date(), 0)) for d in date_range]
+
+    # --- Actividad Reciente ---
+    latest_emergencies = Emergencia.objects.all().order_by('-fecha_hora_alarma')[:5]
+    latest_maintenances = Mantenimiento.objects.all().order_by('-fecha')[:5]
+    latest_salidas = SalidaTerreno.objects.all().order_by('-fecha_hora_salida')[:5]
+    
+    # Combinar y ordenar actividades
+    recent_activity = []
+    for item in latest_emergencies:
+        recent_activity.append({'type': 'Emergencia', 'obj': item, 'date': item.fecha_hora_alarma})
+    for item in latest_maintenances:
+        # Convertimos la fecha (date) a datetime para poder comparar
+        if item.fecha:
+            naive_datetime = datetime.combine(item.fecha, datetime.min.time()) # type: ignore
+            date_as_datetime = timezone.make_aware(naive_datetime, timezone.get_default_timezone()) # type: ignore
+            recent_activity.append({'type': 'Mantenimiento', 'obj': item, 'date': date_as_datetime})
+    for item in latest_salidas:
+        recent_activity.append({'type': 'Salida a Terreno', 'obj': item, 'date': item.fecha_hora_salida})
+
+    # Ordenar por fecha (más reciente primero) y tomar los últimos 5
+    recent_activity = sorted(recent_activity, key=lambda x: x['date'], reverse=True)[:5]
+
+    # --- Datos para Gráfico de Proyectos ---
+    proyectos_por_tipo = Proyecto.objects.values('tipo').annotate(count=Count('id')).order_by('-count')
+    proyecto_labels = [item['tipo'] for item in proyectos_por_tipo]
+    proyecto_data = [item['count'] for item in proyectos_por_tipo]
+
+    # --- Datos para Gráfico de Inventario ---
+    inventario_qs_agrupado = Inventario.objects.all()
+    if not request.user.is_superuser and request.user.compania:
+        inventario_qs_agrupado = inventario_qs_agrupado.filter(Q(compania=request.user.compania) | Q(compania__isnull=True))
+    
+    inventario_por_estado = inventario_qs_agrupado.values('estado').annotate(count=Count('id')).order_by('-count')
+    inventario_labels = [item['estado'] for item in inventario_por_estado]
+    inventario_data = [item['count'] for item in inventario_por_estado]
+
+    # --- Próximos Cursos ---
+    upcoming_courses = Capacitacion.objects.filter(fecha_inicio__gte=timezone.now()).order_by('fecha_inicio')[:5]
+
+    # Compañías para el filtro (solo para superuser)
+    companias_para_filtro = Compania.objects.all() if request.user.is_superuser else None
+
+    if request.headers.get('x-requested-with') == 'XMLHttpRequest':
+        return JsonResponse({
+            'saldo_caja_chica': float(saldo_caja_chica),
+            'nombre_caja': nombre_caja,
+            'caja_chica_labels': caja_chica_labels,
+            'caja_chica_ingresos': caja_chica_ingresos,
+            'caja_chica_egresos': caja_chica_egresos,
+        })
+
+    context = {
+        'total_users': total_users,
+        'total_budget': total_budget,
+        'emergencies_this_month': emergencies_this_month,
+        'saldo_caja_chica': saldo_caja_chica,
+        'emergencia_labels': json.dumps(emergencia_labels),
+        'emergencia_data': json.dumps(emergencia_data),
+        'caja_chica_labels': json.dumps(caja_chica_labels),
+        'caja_chica_ingresos': json.dumps(caja_chica_ingresos),
+        'caja_chica_egresos': json.dumps(caja_chica_egresos),
+        'proyecto_labels': json.dumps(proyecto_labels),
+        'proyecto_data': json.dumps(proyecto_data),
+        'inventario_labels': json.dumps(inventario_labels),
+        'inventario_data': json.dumps(inventario_data),
+        'recent_activity': recent_activity,
+        'upcoming_courses': upcoming_courses,
+        'companias_para_filtro': companias_para_filtro,
+        'filtro_compania_caja': filtro_compania_caja,
+        'nombre_caja': nombre_caja,
+    }
+    return render(request, 'usuarios/dashboard_summary.html', context)
+
+@login_required
+def generar_reporte_anual_pdf(request):
+    if not request.user.is_superuser:
+        messages.error(request, 'No tienes permiso para generar este tipo de reportes.')
+        return redirect('dashboard_summary')
+
+    # --- Módulos a exportar ---
+    modulos_str = request.GET.get('modulos', 'documentos,inventario,salidas,emergencias,cursos,mantenimientos,proyectos,caja_chica')
+    modulos = [m.strip() for m in modulos_str.split(',') if m.strip()]
+
+    # --- Configuración del Documento PDF ---
+    response = HttpResponse(content_type='application/pdf')
+    response['Content-Disposition'] = f'attachment; filename="reporte_anual_{timezone.now().year}.pdf"'
+
+    doc = SimpleDocTemplate(response, pagesize=letter, topMargin=inch, bottomMargin=inch)
+    story = []
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name='TitleStyle', fontSize=24, alignment=TA_CENTER, spaceAfter=20, fontName='Helvetica-Bold'))
+    styles.add(ParagraphStyle(name='HeaderStyle', fontSize=16, alignment=TA_LEFT, spaceAfter=12, fontName='Helvetica-Bold'))
+    styles.add(ParagraphStyle(name='BodyStyle', fontSize=10, alignment=TA_LEFT, leading=14))
+
+    # --- Contenido del PDF ---
+    # Título
+    story.append(Paragraph(f"Memoria Anual {timezone.now().year}", styles['TitleStyle']))
+    story.append(Paragraph(f"Cuerpo de Bomberos - Reporte General del Sistema", styles['h2']))
+    story.append(Spacer(1, 0.5 * inch))
+
+    # Función para crear tablas estilizadas
+    def create_table(data):
+        table = Table(data, colWidths=[doc.width/len(data[0])]*len(data[0]))
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dc3545')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.whitesmoke),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+        ]))
+        return table
+
+    # 1. Proyectos
+    if 'proyectos' in modulos:
+        story.append(Paragraph("Resumen de Proyectos", styles['HeaderStyle']))
+        proyectos = Proyecto.objects.all()
+        proyectos_data = [['Nombre', 'Tipo', 'Responsable', 'Presupuesto']]
+        for p in proyectos:
+            proyectos_data.append([
+                p.nombre, p.tipo, p.responsable.get_full_name() if p.responsable else 'N/A', f"${p.presupuesto or 0:,.0f}"
+            ])
+        story.append(create_table(proyectos_data))
+        story.append(Spacer(1, 0.3 * inch))
+
+    # 2. Emergencias
+    if 'emergencias' in modulos:
+        story.append(Paragraph("Resumen de Emergencias", styles['HeaderStyle']))
+        emergencias = Emergencia.objects.all()
+        emergencias_data = [['Tipo', 'Dirección', 'Fecha', 'Estado']]
+        for e in emergencias:
+            emergencias_data.append([
+                e.get_tipo_display(), e.direccion, e.fecha_hora_alarma.strftime('%d/%m/%Y'), e.estado
+            ])
+        story.append(create_table(emergencias_data))
+        story.append(Spacer(1, 0.3 * inch))
+
+    # 3. Salidas a Terreno
+    if 'salidas' in modulos:
+        story.append(Paragraph("Resumen de Salidas a Terreno", styles['HeaderStyle']))
+        salidas = SalidaTerreno.objects.all()
+        salidas_data = [['Motivo', 'Fecha Salida', 'A Cargo', 'Km Recorridos']]
+        for s in salidas:
+            salidas_data.append([
+                s.motivo, s.fecha_hora_salida.strftime('%d/%m/%Y'), s.personal_a_cargo.get_full_name() if s.personal_a_cargo else 'N/A', f"{s.kilometros_recorridos or 0} km"
+            ])
+        story.append(create_table(salidas_data))
+        story.append(Spacer(1, 0.3 * inch))
+
+    # 4. Mantenimientos
+    if 'mantenimientos' in modulos:
+        story.append(Paragraph("Resumen de Mantenimientos", styles['HeaderStyle']))
+        mantenimientos = Mantenimiento.objects.all()
+        mantenimientos_data = [['Vehículo', 'Fecha', 'Tipo', 'Costo']]
+        for m in mantenimientos:
+            mantenimientos_data.append([
+                m.vehiculo, m.fecha.strftime('%d/%m/%Y'), m.tipo, f"${m.costo or 0:,.0f}"
+            ])
+        story.append(create_table(mantenimientos_data))
+        story.append(Spacer(1, 0.3 * inch))
+
+    # 5. Inventario
+    if 'inventario' in modulos:
+        story.append(Paragraph("Resumen de Inventario", styles['HeaderStyle']))
+        inventario = Inventario.objects.all()
+        # Agrupamos los items por nombre, ubicación y estado para obtener la cantidad
+        inventario_agrupado = Inventario.objects.values('nombre', 'ubicacion', 'estado').annotate(cantidad=Count('id')).order_by('nombre')
+        
+        inventario_data = [['Nombre', 'Cantidad', 'Ubicación', 'Estado']]
+        for i in inventario_agrupado:
+            inventario_data.append([Inventario.ITEM_CHOICES_DICT.get(i['nombre'], i['nombre']), i['cantidad'], i['ubicacion'], i['estado']])
+        story.append(create_table(inventario_data))
+        story.append(Spacer(1, 0.3 * inch))
+
+    # 6. Caja
+    if 'caja_chica' in modulos:
+        story.append(Paragraph("Resumen de Caja", styles['HeaderStyle']))
+        caja_chica = CajaChica.objects.all()
+        if not request.user.is_superuser:
+            if request.user.compania:
+                caja_chica = caja_chica.filter(compania=request.user.compania)
+            else:
+                caja_chica = CajaChica.objects.none()
+                
+        caja_chica_data = [['Fecha', 'Tipo', 'Tipo de cuenta', 'Descripción', 'Monto']]
+        for c in caja_chica:
+            monto_str = f"+${c.monto:,.0f}" if c.tipo == 'Ingreso' else f"-${c.monto:,.0f}"
+            caja_chica_data.append([c.fecha.strftime('%d/%m/%Y'), c.tipo, c.get_tipo_cuenta_display() if c.tipo_cuenta else '—', c.descripcion, monto_str])
+        story.append(create_table(caja_chica_data))
+        story.append(Spacer(1, 0.3 * inch))
+
+    # 7. Cursos
+    if 'cursos' in modulos:
+        story.append(Paragraph("Resumen de Cursos", styles['HeaderStyle']))
+        capacitaciones = Capacitacion.objects.all()
+        cursos_data = [['Nombre', 'Lugar', 'Fecha Inicio', 'Asistentes']]
+        for c in capacitaciones:
+            cursos_data.append([c.nombre, c.lugar, c.fecha_inicio.strftime('%d/%m/%Y'), str(c.asistentes.count())])
+        if len(cursos_data) > 1: story.append(create_table(cursos_data))
+        story.append(Spacer(1, 0.3 * inch))
+
+    # 8. Documentos
+    if 'documentos' in modulos:
+        story.append(Paragraph("Resumen de Documentos", styles['HeaderStyle']))
+        documentos = Documento.objects.all()
+        doc_data = [['Nombre', 'Subido por', 'Fecha', 'Tamaño']]
+        for d in documentos:
+            doc_data.append([d.nombre, d.subido_por.get_full_name() if d.subido_por else 'N/A', d.subido_en.strftime('%d/%m/%Y'), f"{d.tamano_seguro / 1024:.1f} KB"])
+        if len(doc_data) > 1: story.append(create_table(doc_data))
+        story.append(Spacer(1, 0.3 * inch))
+
+    # --- Generar el PDF ---
+    doc.build(story)
+
+    return response
+
+@login_required
+def generar_reporte_anual_excel(request):
+    if not request.user.is_superuser:
+        messages.error(request, 'No tienes permiso para generar este tipo de reportes.')
+        return redirect('dashboard_summary')
+
+    # --- Módulos a exportar ---
+    modulos_str = request.GET.get('modulos', 'documentos,inventario,salidas,emergencias,cursos,mantenimientos,proyectos,caja_chica')
+    modulos = [m.strip() for m in modulos_str.split(',') if m.strip()]
+
+    # --- Configuración del Documento Excel ---
+    response = HttpResponse(content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    response['Content-Disposition'] = f'attachment; filename="reporte_anual_{timezone.now().year}.xlsx"'
+
+    workbook = openpyxl.Workbook()
+
+    # --- Función para añadir datos a una hoja ---
+    def add_sheet(title, headers, data_rows):
+        sheet = workbook.create_sheet(title=title)
+        sheet.append(headers)
+        for row in data_rows:
+            sheet.append(row)
+        # (Opcional) Añadir estilos, autoajuste de columnas, etc.
+
+    # 1. Proyectos
+    if 'proyectos' in modulos:
+        proyectos = Proyecto.objects.all()
+        proyectos_data = []
+        for p in proyectos:
+            proyectos_data.append([
+                p.nombre, p.tipo, p.responsable.get_full_name() if p.responsable else 'N/A', p.presupuesto or 0
+            ])
+        add_sheet("Proyectos", ['Nombre', 'Tipo', 'Responsable', 'Presupuesto'], proyectos_data)
+
+    # 2. Emergencias
+    if 'emergencias' in modulos:
+        emergencias = Emergencia.objects.all()
+        emergencias_data = []
+        for e in emergencias:
+            emergencias_data.append([
+                e.get_tipo_display(), e.direccion, e.fecha_hora_alarma.strftime('%d/%m/%Y %H:%M'), e.estado
+            ])
+        add_sheet("Emergencias", ['Tipo', 'Dirección', 'Fecha', 'Estado'], emergencias_data)
+
+    # 3. Salidas a Terreno
+    if 'salidas' in modulos:
+        salidas = SalidaTerreno.objects.all()
+        salidas_data = []
+        for s in salidas:
+            salidas_data.append([
+                s.motivo, s.fecha_hora_salida.strftime('%d/%m/%Y %H:%M'), s.personal_a_cargo.get_full_name() if s.personal_a_cargo else 'N/A', s.kilometros_recorridos or 0
+            ])
+        add_sheet("Salidas a Terreno", ['Motivo', 'Fecha Salida', 'A Cargo', 'Km Recorridos'], salidas_data)
+
+    # 4. Mantenimientos
+    if 'mantenimientos' in modulos:
+        mantenimientos = Mantenimiento.objects.all()
+        mantenimientos_data = []
+        for m in mantenimientos:
+            mantenimientos_data.append([
+                m.vehiculo, m.fecha.strftime('%d/%m/%Y'), m.tipo, m.costo or 0
+            ])
+        add_sheet("Mantenimientos", ['Vehículo', 'Fecha', 'Tipo', 'Costo'], mantenimientos_data)
+
+    # 5. Inventario
+    if 'inventario' in modulos:
+        inventario_agrupado = Inventario.objects.values('nombre', 'ubicacion', 'estado').annotate(cantidad=Count('id')).order_by('nombre')
+        inventario_data = []
+        for i in inventario_agrupado:
+            inventario_data.append([Inventario.ITEM_CHOICES_DICT.get(i['nombre'], i['nombre']), i['cantidad'], i['ubicacion'], i['estado']])
+        add_sheet("Inventario", ['Nombre', 'Cantidad', 'Ubicación', 'Estado'], inventario_data)
+
+    # 6. Caja
+    if 'caja_chica' in modulos:
+        caja_chica = CajaChica.objects.all()
+        if not request.user.is_superuser:
+            if request.user.compania:
+                caja_chica = caja_chica.filter(compania=request.user.compania)
+            else:
+                caja_chica = CajaChica.objects.none()
+                
+        caja_chica_data = []
+        for c in caja_chica:
+            monto = c.monto if c.tipo == 'Ingreso' else -c.monto
+            caja_chica_data.append([c.fecha.strftime('%d/%m/%Y'), c.tipo, c.get_tipo_cuenta_display() if c.tipo_cuenta else '', c.descripcion, monto])
+        add_sheet("Caja", ['Fecha', 'Tipo', 'Tipo de cuenta', 'Descripción', 'Monto'], caja_chica_data)
+
+    # 7. Cursos
+    if 'cursos' in modulos:
+        capacitaciones = Capacitacion.objects.all()
+        cursos_data = []
+        for c in capacitaciones:
+            cursos_data.append([c.nombre, c.lugar, c.fecha_inicio.strftime('%d/%m/%Y %H:%M'), c.asistentes.count()])
+        add_sheet("Cursos", ['Nombre', 'Lugar', 'Fecha Inicio', 'Asistentes'], cursos_data)
+
+    # 8. Documentos
+    if 'documentos' in modulos:
+        documentos = Documento.objects.all()
+        doc_data = []
+        for d in documentos:
+            doc_data.append([d.nombre, d.subido_por.get_full_name() if d.subido_por else 'N/A', d.subido_en.strftime('%d/%m/%Y %H:%M'), round(d.tamano_seguro / 1024, 2)])
+        add_sheet("Documentos", ['Nombre', 'Subido por', 'Fecha', 'Tamaño (KB)'], doc_data)
+
+    # Eliminar la hoja por defecto que crea openpyxl
+    if len(workbook.sheetnames) > 1 and 'Sheet' in workbook.sheetnames:
+        del workbook['Sheet']
+
+    # --- Guardar el libro de trabajo en la respuesta HTTP ---
+    workbook.save(response)
+
+    return response
+
+@login_required
+def proyectos_view(request):
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.ver_proyectos):
+        messages.error(request, 'No tienes permiso para acceder a Proyectos.')
+        return redirect('dashboard')
+
+    if request.method == 'POST':
+        if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_proyectos):
+            if request.headers.get('x-requested-with') == 'XMLHttpRequest':
+                return JsonResponse({'success': False, 'errors': {'__all__': ['No tienes permiso para crear proyectos.']}}, status=403)
+            messages.error(request, 'No tienes permiso para crear proyectos.')
+            return redirect('proyectos')
+            
+        proyecto_form = ProyectoForm(request.POST) 
+        archivo_form = ArchivoProyectoForm(request.POST, request.FILES) # Este formulario no tiene validación crítica, pero lo mantenemos por consistencia
+        if proyecto_form.is_valid():
+            proyecto = proyecto_form.save(commit=False)
+            proyecto.creado_por = request.user
+            proyecto.save()
+            
+            # Correctamente obtenemos la lista de archivos del campo 'archivos'
+            files = request.FILES.getlist('archivos') 
+            for f in files:
+                ArchivoProyecto.objects.create(proyecto=proyecto, archivo=f)
+            
+            # Si la solicitud es AJAX, devolvemos JSON
+            if request.headers.get('x-requested-with') == 'XMLHttpRequest':
+                return JsonResponse({
+                    'success': True,
+                    'proyecto': {
+                        'id': proyecto.id,
+                        'nombre': proyecto.nombre,
+                        'descripcion': proyecto.descripcion,
+                        'tipo': proyecto.tipo,
+                        'fecha_inicio': proyecto.fecha_inicio.isoformat() if proyecto.fecha_inicio else None,
+                        'fecha_fin': proyecto.fecha_fin.isoformat() if proyecto.fecha_fin else None,
+                        'responsable_nombre': proyecto.responsable.get_full_name() if proyecto.responsable else "No asignado",
+                        'responsable_id': proyecto.responsable.id if proyecto.responsable else None,
+                        'presupuesto': f"{proyecto.presupuesto:,.0f}" if proyecto.presupuesto else None,
+                        'presupuesto_raw': str(proyecto.presupuesto) if proyecto.presupuesto else '',
+                        'prioridad': proyecto.prioridad,
+                        'archivos': list(proyecto.archivos.all().values('archivo', 'subido_en')),
+                    }
+                })
+            else: # Comportamiento normal
+                messages.success(request, f'Proyecto "{proyecto.nombre}" creado exitosamente.')
+                return redirect('proyectos')
+        else:
+            # Si la solicitud es AJAX y hay errores, devolvemos los errores en JSON
+            if request.headers.get('x-requested-with') == 'XMLHttpRequest':
+                return JsonResponse({'success': False, 'errors': proyecto_form.errors}, status=400)
+            else: # Comportamiento normal
+                messages.error(request, 'Hubo un error al crear el proyecto. Por favor, revisa el formulario.')
+
+    else:
+        proyecto_form = ProyectoForm()
+        archivo_form = ArchivoProyectoForm()
+
+    # Extraemos todos los proyectos para quienes tienen permiso de entrar a esta vista
+    proyectos = Proyecto.objects.all().order_by('-creado_en')
+    
+    context = {
+        'proyecto_form': proyecto_form, 
+        'archivo_form': archivo_form, 
+        'proyectos': proyectos,
+        'today': timezone.now().date() # Pasamos la fecha de hoy al contexto
+    }
+    return render(request, 'usuarios/proyectos.html', context)
+
+@login_required
+def proyecto_edit_view(request, proyecto_id):
+    proyecto = get_object_or_404(Proyecto, id=proyecto_id)
+    # Permiso de edición
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_proyectos):
+        messages.error(request, 'No tienes permiso para editar este proyecto.')
+        return redirect('proyectos')
+
+    if request.method == 'POST':
+        form = ProyectoForm(request.POST, instance=proyecto)
+        if form.is_valid():
+            proyecto_actualizado = form.save()
+            
+            # Añadir nuevos archivos si se subieron
+            files = request.FILES.getlist('archivos')
+            for f in files:
+                ArchivoProyecto.objects.create(proyecto=proyecto_actualizado, archivo=f)
+
+            messages.success(request, f'Proyecto "{proyecto_actualizado.nombre}" actualizado exitosamente.')
+        else:
+            messages.error(request, 'Error al actualizar el proyecto. Revisa el formulario.')
+    return redirect('proyectos')
+
+@login_required
+def proyecto_delete_view(request, proyecto_id):
+    proyecto = get_object_or_404(Proyecto, id=proyecto_id)
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_proyectos):
+        messages.error(request, 'No tienes permiso para eliminar este proyecto.')
+        return redirect('proyectos')
+
+    if request.method == 'POST':
+        proyecto_nombre = proyecto.nombre
+        proyecto.delete() # Los archivos se eliminan en cascada gracias a la señal
+        messages.success(request, f'Proyecto "{proyecto_nombre}" y todos sus archivos han sido eliminados.')
+    return redirect('proyectos')
+
+@login_required
+def documentos_view(request):
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.ver_documentacion):
+        messages.error(request, 'No tienes permiso para acceder a Documentos.')
+        return redirect('dashboard')
+
+    if request.method == 'POST':
+        if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_documentacion):
+            messages.error(request, 'No tienes permiso para modificar documentos.')
+            return redirect('documentos')
+            
+        accion = request.POST.get('action')
+        if accion == 'crear_texto':
+            nombre = request.POST.get('nombre_texto')
+            descripcion = request.POST.get('descripcion_texto', '')
+            contenido = request.POST.get('contenido_texto', '')
+            compania_id = request.POST.get('compania')
+            tipo_texto = request.POST.get('tipo', 'General')
+            carpeta_id = request.POST.get('carpeta')
+            es_privado = request.POST.get('es_privado') == 'on'
+
+            if not nombre or not contenido:
+                messages.error(request, 'El título y el contenido son obligatorios.')
+                return redirect('documentos')
+
+            buffer = BytesIO()
+            doc_pdf = SimpleDocTemplate(buffer, pagesize=letter)
+            styles = getSampleStyleSheet()
+            story = []
+            
+            story.append(Paragraph(nombre, styles['Title']))
+            story.append(Spacer(1, 12))
+            
+            for line in contenido.split('\n'):
+                if line.strip():
+                    clean_line = line.strip().replace('<', '&lt;').replace('>', '&gt;')
+                    story.append(Paragraph(clean_line, styles['Normal']))
+                else:
+                    story.append(Spacer(1, 12))
+                    
+            doc_pdf.build(story)
+            pdf_bytes = buffer.getvalue()
+            buffer.close()
+
+            safe_filename = re.sub(r'[^a-zA-Z0-9_\-]', '_', nombre) + '.pdf'
+
+            documento = Documento(
+                nombre=nombre,
+                descripcion=descripcion,
+                tipo=tipo_texto,
+                subido_por=request.user,
+                es_privado=es_privado
+            )
+            
+            if carpeta_id:
+                try:
+                    documento.carpeta = Carpeta.objects.get(id=carpeta_id)
+                except Carpeta.DoesNotExist:
+                    pass
+            
+            if request.user.is_superuser and compania_id:
+                try:
+                    documento.compania = Compania.objects.get(id=compania_id)
+                except Compania.DoesNotExist:
+                    pass
+            elif not request.user.is_superuser and request.user.compania:
+                documento.compania = request.user.compania
+                
+            documento.archivo.save(safe_filename, ContentFile(pdf_bytes), save=False)
+            documento.save()
+            
+            messages.success(request, f'Documento "{nombre}" redactado y guardado como PDF exitosamente.')
+            return redirect('documentos')
+        elif accion == 'crear_carpeta':
+            carpeta_form = CarpetaForm(request.POST, user=request.user)
+            if carpeta_form.is_valid():
+                carpeta = carpeta_form.save(commit=False)
+                carpeta.creado_por = request.user
+                if not request.user.is_superuser and request.user.compania:
+                    carpeta.compania = request.user.compania
+                carpeta.save()
+                carpeta_form.save_m2m()
+                messages.success(request, f'Carpeta "{carpeta.nombre}" creada exitosamente.')
+                return redirect('documentos')
+            else:
+                messages.error(request, f'Error al crear la carpeta: {carpeta_form.errors.as_text()}')
+        else:
+            form = DocumentoForm(request.POST, request.FILES, user=request.user)
+            if form.is_valid():
+                documento = form.save(commit=False)
+                documento.subido_por = request.user
+                
+                if not request.user.is_superuser and request.user.compania:
+                    documento.compania = request.user.compania
+                    
+                documento.save()
+                form.save_m2m()
+                messages.success(request, f'Documento "{documento.nombre}" subido exitosamente.')
+                return redirect('documentos')
+            else:
+                messages.error(request, f'Error al subir el documento: {form.errors.as_text()}')
+    else:
+        form = DocumentoForm(user=request.user)
+    
+    carpeta_form = CarpetaForm(user=request.user)
+    
+    # --- Lógica de Búsqueda y Filtros ---
+    query = request.GET.get('q')
+    tipo_archivo = request.GET.get('tipo_archivo')
+    tipo_documento = request.GET.get('tipo_documento')
+    usuario_id = request.GET.get('usuario')
+    ordenar_por = request.GET.get('ordenar_por', '-subido_en') # Por defecto, los más nuevos primero
+    carpeta_id = request.GET.get('carpeta')
+
+    documentos = Documento.objects.select_related('subido_por', 'compania', 'carpeta').filter(es_de_inspector=False)
+    carpetas = Carpeta.objects.select_related('compania', 'creado_por').filter(es_de_inspector=False)
+
+    if not request.user.is_superuser:
+        if request.user.compania:
+            documentos = documentos.filter(Q(compania=request.user.compania) | Q(compania__isnull=True))
+            carpetas = carpetas.filter(Q(compania=request.user.compania) | Q(compania__isnull=True))
+        else:
+            documentos = documentos.filter(compania__isnull=True)
+            carpetas = carpetas.filter(compania__isnull=True)
+            
+    # Filtro de privacidad: (No es privado) OR (Soy el creador)
+    documentos = documentos.filter(
+        Q(es_privado=False) |
+        Q(subido_por=request.user)
+    ).distinct()
+    
+    carpetas = carpetas.filter(
+        Q(es_privado=False) |
+        Q(creado_por=request.user)
+    ).distinct()
+            
+    # Filtrar por carpeta actual
+    carpeta_actual = None
+    if carpeta_id:
+        try:
+            carpeta_actual = carpetas.get(id=carpeta_id)
+            documentos = documentos.filter(carpeta=carpeta_actual)
+            carpetas = Carpeta.objects.none() # No mostramos subcarpetas por ahora
+        except Carpeta.DoesNotExist:
+            documentos = documentos.filter(carpeta__isnull=True)
+    else:
+        documentos = documentos.filter(carpeta__isnull=True)
+
+    # Filtrar por término de búsqueda
+    if query:
+        documentos = documentos.filter(
+            Q(nombre__icontains=query) |
+            Q(descripcion__icontains=query)
+        )
+
+    # Filtrar por tipo de archivo
+    if tipo_archivo:
+        if tipo_archivo == 'pdf':
+            documentos = documentos.filter(archivo__iendswith='.pdf')
+        elif tipo_archivo == 'word':
+            documentos = documentos.filter(Q(archivo__iendswith='.doc') | Q(archivo__iendswith='.docx'))
+        elif tipo_archivo == 'excel':
+            documentos = documentos.filter(Q(archivo__iendswith='.xls') | Q(archivo__iendswith='.xlsx'))
+        elif tipo_archivo == 'imagen':
+            documentos = documentos.filter(Q(archivo__iendswith='.jpg') | Q(archivo__iendswith='.jpeg') | Q(archivo__iendswith='.png'))
+
+    # Filtrar por tipo de documento
+    if tipo_documento:
+        documentos = documentos.filter(tipo=tipo_documento)
+
+    # Filtrar por usuario
+    if usuario_id:
+        documentos = documentos.filter(subido_por__id=usuario_id)
+
+    # Aplicar ordenamiento
+    valid_sorts = ['-subido_en', 'subido_en', 'nombre', '-nombre']
+    if ordenar_por in valid_sorts:
+        documentos = documentos.order_by(ordenar_por)
+
+    if not request.user.is_superuser and request.user.compania:
+        usuarios_con_docs = Usuario.objects.filter(
+            Q(compania__isnull=False) & (Q(documento__compania=request.user.compania) | Q(documento__compania__isnull=True)),
+            documento__isnull=False,
+            documento__es_de_inspector=False,
+        ).distinct().order_by('nombre')
+    else:
+        usuarios_con_docs = Usuario.objects.filter(compania__isnull=False, documento__isnull=False, documento__es_de_inspector=False).distinct().order_by('nombre')
+
+    context = {
+        'form': form, 
+        'carpeta_form': carpeta_form,
+        'documentos': documentos, 
+        'carpetas': carpetas,
+        'carpeta_actual': carpeta_actual,
+        'usuarios_con_docs': usuarios_con_docs,
+        'tipos_documento': Documento.TIPO_DOCUMENTO_CHOICES
+    }
+    return render(request, 'usuarios/documentos.html', context)
+
+@login_required
+def documento_descargar_view(request, doc_id):
+    documento = get_object_or_404(Documento, id=doc_id)
+    
+    # 1. Verificación de compañía
+    if not pertenencia_compania(request.user, documento.compania):
+        messages.error(request, 'No tienes acceso a los documentos de esta compañía.')
+        return redirect('documentos')
+        
+    # 2. Verificación si el documento es de inspectores
+    if documento.es_de_inspector:
+        if not (request.user.is_superuser or (request.user.rol and request.user.rol.ver_inspectores)):
+            messages.error(request, 'No tienes permiso para ver documentos de inspectores.')
+            return redirect('dashboard')
+            
+    # 3. Verificación de documento privado
+    if documento.es_privado and documento.subido_por != request.user and not request.user.is_superuser:
+        messages.error(request, 'Este documento es privado.')
+        return redirect('documentos')
+
+    if not documento.archivo_existe:
+        messages.error(request, 'El archivo solicitado no se encuentra físicamente en el servidor.')
+        return redirect('documentos')
+
+    from django.http import FileResponse
+    response = FileResponse(documento.archivo.open('rb'))
+    response['Content-Disposition'] = f'inline; filename="{documento.nombre}"'
+    return response
+
+@login_required
+def documento_delete_view(request, doc_id):
+
+    documento = get_object_or_404(Documento, id=doc_id)
+    is_inspector = documento.es_de_inspector
+    
+    if is_inspector:
+        if not (request.user.is_superuser or (hasattr(request.user, 'rol') and request.user.rol and request.user.rol.editar_inspectores)):
+            messages.error(request, 'No tienes permiso para eliminar documentos de inspectores.')
+            return redirect('inspectores')
+    else:
+        if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_documentacion):
+            messages.error(request, 'No tienes permiso para eliminar este documento.')
+            return redirect('documentos')
+
+    if not pertenencia_compania(request.user, documento.compania):
+        messages.error(request, 'No tienes acceso a documentos de esta compañía.')
+        return redirect('inspectores' if is_inspector else 'documentos')
+
+    if request.method == 'POST':
+        doc_name = documento.nombre
+        documento.delete()
+        messages.success(request, f'Documento "{doc_name}" eliminado exitosamente.')
+    
+    return redirect('inspectores' if is_inspector else 'documentos')
+
+@login_required
+def carpeta_delete_view(request, carpeta_id):
+    carpeta = get_object_or_404(Carpeta, id=carpeta_id)
+    is_inspector = carpeta.es_de_inspector
+
+    if is_inspector:
+        if not (request.user.is_superuser or (hasattr(request.user, 'rol') and request.user.rol and request.user.rol.editar_inspectores)):
+            messages.error(request, 'No tienes permiso para eliminar carpetas de inspectores.')
+            return redirect('inspectores')
+    else:
+        if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_documentacion):
+            messages.error(request, 'No tienes permiso para eliminar carpetas.')
+            return redirect('documentos')
+
+    if not pertenencia_compania(request.user, carpeta.compania):
+        messages.error(request, 'No tienes acceso a carpetas de esta compañía.')
+        return redirect('inspectores' if is_inspector else 'documentos')
+
+    if request.method == 'POST':
+        nombre = carpeta.nombre
+        carpeta.delete()
+        messages.success(request, f'Carpeta "{nombre}" y todo su contenido eliminados exitosamente.')
+    return redirect('inspectores' if is_inspector else 'documentos')
+
+@login_required
+def inventario_view(request):
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.ver_inventario):
+        messages.error(request, 'No tienes permiso para acceder al Inventario.')
+        return redirect('dashboard')
+
+    # Esta vista ahora solo maneja la creación de nuevos ítems.
+    if request.method == 'POST':
+        if not puede_editar_inventario(request.user):
+            messages.error(request, 'No tienes permiso para agregar ítems.')
+            return redirect('inventario')
+            
+        form = InventarioForm(request.POST, user=request.user)
+        if form.is_valid():
+            if puede_gestionar_inventario_global(request.user):
+                compania_id = request.POST.get('compania_activa', '')
+                compania_objetivo = Compania.objects.filter(pk=compania_id).first() if compania_id.isdigit() else None
+            else:
+                compania_objetivo = request.user.compania
+
+            if not compania_objetivo:
+                form.add_error(None, 'Selecciona una compañía antes de agregar ítems al inventario.')
+            else:
+                cantidad = form.cleaned_data.get('cantidad', 1)
+
+                for _ in range(cantidad):
+                    item = Inventario(
+                        nombre=form.cleaned_data['nombre'],
+                        compania=compania_objetivo,
+                        ubicacion=form.cleaned_data['ubicacion'],
+                        estado=form.cleaned_data['estado'],
+                        fecha_adquisicion=form.cleaned_data.get('fecha_adquisicion'),
+                        valor=form.cleaned_data.get('valor'),
+                        agregado_por=request.user
+                    )
+                    item.save() # El método save() del modelo se encarga del QR
+
+                messages.success(request, f'{cantidad} ítem(s) de "{item.get_nombre_display()}" agregados exitosamente.')
+                if puede_gestionar_inventario_global(request.user):
+                    return redirect(f"{reverse('inventario')}?compania_activa={compania_objetivo.id}")
+                return redirect('inventario')
+        else:
+            messages.error(request, 'Error al agregar el ítem. Por favor, revisa el formulario.')
+
+    # --- Lógica de visualización ---
+    inventario_por_compania = {}
+    puede_ver_todas_companias = puede_gestionar_inventario_global(request.user)
+    companias_a_mostrar = Compania.objects.all()
+    companias_selector = companias_a_mostrar
+
+    if not puede_ver_todas_companias:
+        companias_a_mostrar = Compania.objects.filter(pk=request.user.compania_id) if request.user.compania_id else Compania.objects.none()
+
+    # Búsqueda general
+    query = request.GET.get('q')
+    compania_activa_id = request.POST.get('compania_activa', request.GET.get('compania_activa'))
+
+    # El selector global y el detalle son pantallas distintas. En el detalle
+    # solo se consulta y renderiza la compañía seleccionada.
+    if puede_ver_todas_companias:
+        if compania_activa_id and compania_activa_id.isdigit():
+            companias_a_mostrar = companias_a_mostrar.filter(pk=compania_activa_id)
+        else:
+            compania_activa_id = ''
+            companias_a_mostrar = Compania.objects.none()
+
+    for compania in companias_a_mostrar:
+        base_queryset = Inventario.objects.filter(compania=compania).select_related('asignado_a', 'compania', 'asignado_a_vehiculo')
+
+        if query:
+            base_queryset = base_queryset.filter(
+                Q(nombre__icontains=query) |
+                Q(asignado_a__nombre__icontains=query) |
+                Q(asignado_a__apellido__icontains=query) |
+                Q(asignado_a_vehiculo__nombre__icontains=query) |
+                Q(ubicacion__icontains=query)
+            )
+
+        items_asignados_qs = base_queryset.filter(asignado_a__isnull=False).order_by('asignado_a__nombre', 'asignado_a__apellido', 'nombre')
+        
+        user_groups = {}
+        for item in items_asignados_qs:
+            if item.asignado_a not in user_groups:
+                user_groups[item.asignado_a] = []
+            user_groups[item.asignado_a].append(item)
+            
+        items_asignados = [{'usuario': u, 'items': items} for u, items in user_groups.items()]
+        
+        # Procesar los carros y sus ítems asignados para esta compañía (los carros se muestran primero)
+        vehiculos_compania = Vehiculo.objects.filter(compania=compania).order_by('nombre')
+        items_asignados_vehiculo_qs = base_queryset.filter(asignado_a_vehiculo__isnull=False).order_by('asignado_a_vehiculo__nombre', 'nombre')
+        
+        vehiculo_groups = {v: [] for v in vehiculos_compania}
+        for item in items_asignados_vehiculo_qs:
+            if item.asignado_a_vehiculo in vehiculo_groups:
+                vehiculo_groups[item.asignado_a_vehiculo].append(item)
+                
+        items_asignados_vehiculos = [{'vehiculo': v, 'items': items} for v, items in vehiculo_groups.items()]
+        
+        # Procesamos los ítems disponibles para añadir el nombre completo
+        items_disponibles_agrupados_qs = base_queryset.filter(asignado_a__isnull=True, asignado_a_vehiculo__isnull=True).values('nombre', 'ubicacion', 'estado', 'compania', 'fecha_adquisicion', 'valor').annotate(cantidad=Count('id')).order_by('nombre', 'ubicacion', 'estado')
+        items_disponibles_agrupados = []
+        for item in items_disponibles_agrupados_qs:
+            item['nombre_completo'] = Inventario.get_nombre_completo(item['nombre'])
+            items_disponibles_agrupados.append(item)
+
+        inventario_por_compania[compania] = {
+            'asignados': items_asignados,
+            'asignados_vehiculos': items_asignados_vehiculos,
+            'disponibles_agrupados': items_disponibles_agrupados
+        }
+
+    if compania_activa_id and not any(str(compania.id) == compania_activa_id for compania in inventario_por_compania):
+        compania_activa_id = ''
+
+    # Datos para el nuevo panel de asignación
+    usuarios_activos = Usuario.objects.miembros_activos().order_by('nombre')
+    # Los roles limitados solo pueden asignar a miembros de su propia compañía.
+    if not puede_ver_todas_companias:
+        usuarios_activos = usuarios_activos.filter(compania_id=request.user.compania_id)
+    
+    # Obtener vehículos activos para la asignación
+    vehiculos_activos = Vehiculo.objects.all().order_by('nombre')
+    if not puede_ver_todas_companias and request.user.compania_id:
+        vehiculos_activos = vehiculos_activos.filter(compania=request.user.compania)
+
+    # CORRECCIÓN: Agrupar los ítems disponibles por nombre Y por compañía para el selector de asignación.
+    items_disponibles_qs = Inventario.objects.filter(asignado_a__isnull=True, asignado_a_vehiculo__isnull=True).values('nombre', 'compania_id').annotate(cantidad=Count('id')).order_by('nombre')
+    
+    items_disponibles_para_asignar = []
+    for item in items_disponibles_qs:
+        item['nombre_completo'] = Inventario.get_nombre_completo(item['nombre'])
+        items_disponibles_para_asignar.append(item)
+
+    resumen_general = None
+    if puede_ver_todas_companias:
+        resumen_general_qs = Inventario.objects.values('nombre').annotate(
+            total=Count('id'),
+            buenos=Count('id', filter=Q(estado='Bueno')),
+            regulares=Count('id', filter=Q(estado='Regular')),
+            malos=Count('id', filter=Q(estado='Malo')),
+            reparacion=Count('id', filter=Q(estado='En Reparación')),
+            baja=Count('id', filter=Q(estado='De Baja')),
+            asignados=Count('id', filter=Q(asignado_a__isnull=False) | Q(asignado_a_vehiculo__isnull=False)),
+            disponibles=Count('id', filter=Q(asignado_a__isnull=True, asignado_a_vehiculo__isnull=True))
+        ).order_by('nombre')
+        
+        resumen_general = []
+        for item in resumen_general_qs:
+            item['nombre_completo'] = Inventario.get_nombre_completo(item['nombre'])
+            resumen_general.append(item)
+
+    context = {
+        'form': InventarioForm(user=request.user), 
+        'edit_form': InventarioEditForm(user=request.user), # Para el modal de edición
+        'group_edit_form': InventarioGroupEditForm(user=request.user), # Para el modal de edición de grupo
+        'vehiculo_form': VehiculoForm(user=request.user), # Formulario para crear carro
+        'inventario_por_compania': inventario_por_compania,
+        'companias_selector': companias_selector,
+        'items_disponibles_para_asignar': items_disponibles_para_asignar,
+        'usuarios_activos': usuarios_activos,
+        'vehiculos_activos': vehiculos_activos,
+        'resumen_general': resumen_general,
+        'first_compania_id': list(inventario_por_compania.keys())[0].id if inventario_por_compania else None,
+        'puede_gestionar_inventario_global': puede_ver_todas_companias,
+        'compania_activa_id': compania_activa_id or '',
+    }
+    return render(request, 'usuarios/inventario.html', context)
+
+@login_required
+def inventario_edit_view(request, item_id):
+    item = get_object_or_404(Inventario, id=item_id)
+    if not puede_editar_inventario(request.user):
+        messages.error(request, 'No tienes permiso para editar este ítem.')
+        return redirect('inventario')
+    if not puede_acceder_inventario_compania(request.user, item.compania):
+        messages.error(request, 'No tienes acceso al inventario de esta compañía.')
+        return redirect('inventario')
+
+    if request.method == 'POST':
+        # Usamos un formulario sin el campo 'cantidad' para la edición
+        form = InventarioEditForm(request.POST, instance=item, user=request.user)
+        if form.is_valid():
+            form.save()
+            messages.success(request, f'Ítem "{item.get_nombre_display()}" actualizado exitosamente.')
+        else:
+            messages.error(request, 'Error al actualizar el ítem. Por favor, revisa el formulario.')
+    return redirect('inventario')
+
+@login_required
+def inventario_delete_view(request, item_id):
+    if request.method != 'POST':
+        return redirect('inventario')
+
+    item = Inventario.objects.filter(id=item_id).first()
+    if item is None:
+        messages.warning(request, 'El ítem ya no existe o fue eliminado anteriormente.')
+        return redirect('inventario')
+
+    if not puede_editar_inventario(request.user):
+        messages.error(request, 'No tienes permiso para eliminar este ítem.')
+        return redirect('inventario')
+    if not puede_acceder_inventario_compania(request.user, item.compania):
+        messages.error(request, 'No tienes acceso al inventario de esta compañía.')
+        return redirect('inventario')
+
+    item_name = item.get_nombre_display()
+    item.delete()
+    messages.success(request, f'Ítem "{item_name}" eliminado exitosamente.')
+    return redirect('inventario')
+
+@login_required
+def vehiculo_create_view(request):
+    if not puede_editar_inventario(request.user):
+        messages.error(request, 'No tienes permiso para realizar esta acción.')
+        return redirect('inventario')
+
+    if request.method == 'POST':
+        form = VehiculoForm(request.POST, user=request.user)
+        if form.is_valid():
+            vehiculo = form.save(commit=False)
+            if not puede_gestionar_inventario_global(request.user):
+                vehiculo.compania = request.user.compania
+            vehiculo.save()
+            messages.success(request, f'Carro "{vehiculo.nombre}" registrado exitosamente.')
+        else:
+            messages.error(request, 'Error al registrar el carro. Por favor, verifica los datos.')
+    return redirect('inventario')
+
+@login_required
+def vehiculo_edit_view(request, vehiculo_id):
+    vehiculo = get_object_or_404(Vehiculo, id=vehiculo_id)
+    if not puede_editar_inventario(request.user):
+        messages.error(request, 'No tienes permiso para realizar esta acción.')
+        return redirect('inventario')
+    if not puede_acceder_inventario_compania(request.user, vehiculo.compania):
+        messages.error(request, 'No tienes acceso a carros de esta compañía.')
+        return redirect('inventario')
+
+    if request.method == 'POST':
+        form = VehiculoForm(request.POST, instance=vehiculo, user=request.user)
+        if form.is_valid():
+            vehiculo = form.save(commit=False)
+            if not puede_gestionar_inventario_global(request.user):
+                vehiculo.compania = request.user.compania
+            vehiculo.save()
+            messages.success(request, f'Carro "{vehiculo.nombre}" actualizado exitosamente.')
+        else:
+            messages.error(request, 'Error al actualizar el carro. Por favor, verifica los datos.')
+    return redirect('inventario')
+
+
+@login_required
+def vehiculo_hoja_vida_view(request, vehiculo_id):
+    vehiculo = get_object_or_404(Vehiculo.objects.select_related('compania'), id=vehiculo_id)
+    rol = getattr(request.user, 'rol', None)
+    puede_ver = request.user.is_superuser or bool(rol and (rol.ver_inventario or rol.ver_mantenimientos))
+    if not puede_ver:
+        messages.error(request, 'No tienes permiso para acceder a la hoja de vida del carro.')
+        return redirect('dashboard')
+    if not puede_acceder_inventario_compania(request.user, vehiculo.compania):
+        messages.error(request, 'No tienes acceso a carros de esta compañía.')
+        return redirect('inventario')
+
+    puede_editar = puede_editar_inventario(request.user)
+    puede_registrar_ronda = puede_editar_inventario(request.user) or bool(rol and rol.editar_mantenimientos)
+    puede_editar_mantenimientos = request.user.is_superuser or bool(rol and rol.editar_mantenimientos)
+    form = VehiculoHojaVidaForm(instance=vehiculo)
+    documento_form = VehiculoDocumentacionForm(instance=vehiculo)
+    ronda_form = RondaVehiculoForm()
+    edit_ronda_form = RondaVehiculoForm(auto_id='id_editar_%s')
+    active_tab = request.GET.get('tab') if request.GET.get('tab') in ('datos', 'documentacion', 'rondas') else 'datos'
+    accion = request.POST.get('accion') if request.method == 'POST' else ''
+    if accion == 'eliminar_mantenimiento':
+        if not puede_editar_mantenimientos:
+            messages.error(request, 'No tienes permiso para eliminar mantenimientos.')
+            return redirect('vehiculo_hoja_vida', vehiculo_id=vehiculo.id)
+        filtro_mantenimiento = Q(vehiculo__iexact=vehiculo.nombre)
+        if vehiculo.patente:
+            filtro_mantenimiento |= Q(vehiculo__iexact=vehiculo.patente)
+        mantenimiento = get_object_or_404(Mantenimiento.objects.filter(filtro_mantenimiento), id=request.POST.get('mantenimiento_id'))
+        mantenimiento.delete()
+        messages.success(request, 'El mantenimiento se eliminó correctamente.')
+        return redirect(f"{reverse('vehiculo_hoja_vida', kwargs={'vehiculo_id': vehiculo.id})}?tab=rondas")
+    elif accion in ('registrar_ronda', 'editar_ronda', 'eliminar_ronda'):
+        active_tab = 'rondas'
+        if not puede_registrar_ronda:
+            messages.error(request, 'No tienes permiso para registrar rondas de vehículos.')
+            return redirect('vehiculo_hoja_vida', vehiculo_id=vehiculo.id)
+        ronda = None
+        if accion in ('editar_ronda', 'eliminar_ronda'):
+            ronda = get_object_or_404(RondaVehiculo, id=request.POST.get('ronda_id'), vehiculo=vehiculo)
+        if accion == 'eliminar_ronda':
+            ronda.delete()
+            messages.success(request, 'La ronda se eliminó correctamente.')
+            return redirect(f"{reverse('vehiculo_hoja_vida', kwargs={'vehiculo_id': vehiculo.id})}?tab=rondas")
+        if accion == 'editar_ronda':
+            edit_ronda_form = RondaVehiculoForm(request.POST, instance=ronda, auto_id='id_editar_%s')
+            ronda_post_form = edit_ronda_form
+        else:
+            ronda_form = RondaVehiculoForm(request.POST)
+            ronda_post_form = ronda_form
+        if ronda_post_form.is_valid():
+            ronda = ronda_post_form.save(commit=False)
+            ronda.vehiculo = vehiculo
+            if not ronda.pk:
+                ronda.registrado_por = request.user
+            ronda.save()
+            if accion == 'registrar_ronda' and ronda.estado_operativo and vehiculo.estado != ronda.estado_operativo:
+                vehiculo.estado = ronda.estado_operativo
+                vehiculo.save(update_fields=['estado'])
+            messages.success(request, 'La ronda del carro se guardó correctamente.')
+            return redirect(f"{reverse('vehiculo_hoja_vida', kwargs={'vehiculo_id': vehiculo.id})}?tab=rondas")
+        messages.error(request, 'No se pudo guardar la ronda. Revisa los campos indicados.')
+        form = VehiculoHojaVidaForm(instance=vehiculo)
+    elif accion in ('guardar_datos', 'guardar_documentacion'):
+        if not puede_editar:
+            messages.error(request, 'No tienes permiso para editar la hoja de vida del carro.')
+            return redirect('vehiculo_hoja_vida', vehiculo_id=vehiculo.id)
+        if accion == 'guardar_datos':
+            form = VehiculoHojaVidaForm(request.POST, instance=vehiculo)
+            documento_form = VehiculoDocumentacionForm(instance=vehiculo)
+            if form.is_valid():
+                form.save()
+                messages.success(request, 'Las especificaciones y componentes del carro se actualizaron correctamente.')
+                return redirect('vehiculo_hoja_vida', vehiculo_id=vehiculo.id)
+            messages.error(request, 'No se pudieron guardar las especificaciones. Revisa los campos indicados.')
+        else:
+            active_tab = 'documentacion'
+            documento_form = VehiculoDocumentacionForm(request.POST, request.FILES, instance=vehiculo)
+            form = VehiculoHojaVidaForm(instance=vehiculo)
+            if documento_form.is_valid():
+                archivos_anteriores = {
+                    nombre: getattr(vehiculo, nombre)
+                    for nombre in ('revision_tecnica_archivo', 'permiso_circulacion_archivo')
+                }
+                documento_form.save()
+                for nombre, archivo_anterior in archivos_anteriores.items():
+                    archivo_actual = getattr(vehiculo, nombre)
+                    if archivo_anterior and archivo_anterior.name != getattr(archivo_actual, 'name', None):
+                        archivo_anterior.delete(save=False)
+                messages.success(request, 'La documentación legal se actualizó correctamente.')
+                return redirect(f"{reverse('vehiculo_hoja_vida', kwargs={'vehiculo_id': vehiculo.id})}?tab=documentacion")
+            messages.error(request, 'No se pudo guardar la documentación. Revisa los campos indicados.')
+    elif request.method == 'POST':
+        messages.error(request, 'La acción solicitada no es válida.')
+        return redirect('vehiculo_hoja_vida', vehiculo_id=vehiculo.id)
+    else:
+        if request.method != 'POST':
+            form = VehiculoHojaVidaForm(instance=vehiculo)
+
+    filtros_vehiculo = Q(vehiculo__iexact=vehiculo.nombre)
+    if vehiculo.patente:
+        filtros_vehiculo |= Q(vehiculo__iexact=vehiculo.patente)
+    mantenimientos = Mantenimiento.objects.filter(
+        filtros_vehiculo
+    ).select_related('responsable').prefetch_related('archivos').order_by('-fecha')
+
+    hoy = timezone.localdate()
+    vencimientos = {}
+    for field_name in ('revision_tecnica_vencimiento', 'permiso_circulacion_vencimiento', 'soap_vencimiento', 'seguro_vencimiento'):
+        fecha = getattr(vehiculo, field_name)
+        dias = (fecha - hoy).days if fecha else None
+        vencimientos[field_name] = (
+            'Sin fecha' if dias is None else
+            'Vencido' if dias < 0 else
+            'Vence pronto' if dias <= 30 else
+            'Vigente'
+        )
+    return render(request, 'usuarios/vehiculo_hoja_vida.html', {
+        'vehiculo': vehiculo,
+        'form': form,
+        'documento_form': documento_form,
+        'active_tab': active_tab,
+        'mantenimientos': mantenimientos,
+        'puede_editar': puede_editar,
+        'puede_editar_mantenimientos': puede_editar_mantenimientos,
+        'puede_registrar_ronda': puede_registrar_ronda,
+        'ronda_form': ronda_form,
+        'edit_ronda_form': edit_ronda_form,
+        'rondas': vehiculo.rondas.select_related('registrado_por').all(),
+        'vencimientos': vencimientos,
+    })
+
+@login_required
+def vehiculo_delete_view(request, vehiculo_id):
+    vehiculo = get_object_or_404(Vehiculo, id=vehiculo_id)
+    if not puede_editar_inventario(request.user):
+        messages.error(request, 'No tienes permiso para realizar esta acción.')
+        return redirect('inventario')
+    if not puede_acceder_inventario_compania(request.user, vehiculo.compania):
+        messages.error(request, 'No tienes acceso a carros de esta compañía.')
+        return redirect('inventario')
+
+    if request.method == 'POST':
+        vehiculo_nombre = vehiculo.nombre
+        items_asignados = Inventario.objects.filter(asignado_a_vehiculo=vehiculo)
+        for item in items_asignados:
+            item.asignado_a_vehiculo = None
+            item.save()
+        vehiculo.delete()
+        messages.success(request, f'Carro "{vehiculo_nombre}" eliminado exitosamente.')
+    return redirect('inventario')
+
+@login_required
+def inventario_unassign_view(request, item_id):
+    item = get_object_or_404(Inventario, id=item_id)
+    if not puede_editar_inventario(request.user):
+        messages.error(request, 'No tienes permiso para modificar este ítem.')
+        return redirect('inventario')
+    if not puede_acceder_inventario_compania(request.user, item.compania):
+        messages.error(request, 'No tienes acceso al inventario de esta compañía.')
+        return redirect('inventario')
+
+    if request.method == 'POST':
+        usuario_anterior = item.asignado_a
+        vehiculo_anterior = item.asignado_a_vehiculo
+        item_name = item.get_nombre_display()
+        
+        if usuario_anterior:
+            item.asignado_a = None
+            item.save() # El save() limpiará también el QR asignado a este ítem automáticamente
+            Notificacion.objects.create(
+                usuario=usuario_anterior,
+                mensaje=f"Has devuelto a bodega el equipo: {item_name}.",
+                link="/inventario/"
+            )
+            messages.success(request, f'Ítem "{item_name}" devuelto a bodega exitosamente (desasignado de {usuario_anterior.get_full_name()}).')
+        elif vehiculo_anterior:
+            item.asignado_a_vehiculo = None
+            item.save() # El save() limpiará también el QR asignado a este ítem automáticamente
+            messages.success(request, f'Ítem "{item_name}" devuelto a bodega exitosamente (desasignado del carro {vehiculo_anterior.nombre}).')
+        else:
+            messages.warning(request, f'El ítem "{item_name}" ya se encontraba en bodega.')
+            
+    return redirect('inventario')
+
+@login_required
+def inventario_assign_view(request):
+    if not puede_editar_inventario(request.user):
+        messages.error(request, 'No tienes permiso para realizar esta acción.')
+        return redirect('inventario')
+
+    if request.method == 'POST':
+        tipo_asignacion = request.POST.get('tipo_asignacion', 'usuario') # 'usuario' o 'vehiculo'
+        items_nombres = request.POST.getlist('item_a_asignar')
+        cantidades = request.POST.getlist('cantidad_a_asignar')
+
+        if not items_nombres or not cantidades:
+            messages.error(request, 'Debes seleccionar al menos un ítem válido para asignar.')
+            return redirect('inventario')
+
+        usuario = None
+        vehiculo = None
+        compania_objetivo = None
+
+        if tipo_asignacion == 'usuario':
+            user_id = request.POST.get('usuario_a_asignar')
+            if not user_id:
+                messages.error(request, 'Debes seleccionar un usuario para asignar.')
+                return redirect('inventario')
+            usuario = get_object_or_404(Usuario, id=user_id)
+            if not usuario.compania:
+                messages.error(request, f'El usuario {usuario.get_full_name()} no tiene una compañía asignada.')
+                return redirect('inventario')
+            compania_objetivo = usuario.compania
+        else:
+            vehiculo_id = request.POST.get('vehiculo_a_asignar')
+            if not vehiculo_id:
+                messages.error(request, 'Debes seleccionar un carro de bomberos para asignar.')
+                return redirect('inventario')
+            vehiculo = get_object_or_404(Vehiculo, id=vehiculo_id)
+            compania_objetivo = vehiculo.compania
+
+        if not puede_acceder_inventario_compania(request.user, compania_objetivo):
+            messages.error(request, 'No tienes permiso para administrar inventario de esta compañía.')
+            return redirect('inventario')
+
+        num_asignados_total = 0
+        items_asignados_detalle = []
+        errores = []
+
+        for item_nombre, cantidad_str in zip(items_nombres, cantidades):
+            try:
+                cantidad_a_asignar = int(cantidad_str)
+            except (ValueError, TypeError):
+                cantidad_a_asignar = 0
+
+            if cantidad_a_asignar <= 0:
+                continue
+
+            # Buscar ítems que estén totalmente disponibles (ni asignados a usuario ni a vehículo)
+            items_para_asignar = Inventario.objects.filter(
+                nombre=item_nombre, 
+                asignado_a__isnull=True,
+                asignado_a_vehiculo__isnull=True,
+                compania=compania_objetivo
+            )[:cantidad_a_asignar]
+
+            if not items_para_asignar:
+                errores.append(f'No hay ítems de "{Inventario.ITEM_CHOICES_DICT.get(item_nombre, item_nombre)}" disponibles en la {compania_objetivo.nombre}.')
+                continue
+
+            if len(items_para_asignar) < cantidad_a_asignar:
+                errores.append(f'No había suficientes "{Inventario.ITEM_CHOICES_DICT.get(item_nombre, item_nombre)}". Solo se asignaron {len(items_para_asignar)} de {cantidad_a_asignar}.')
+
+            asignados_de_este_tipo = 0
+            for item in items_para_asignar:
+                if tipo_asignacion == 'usuario':
+                    item.asignado_a = usuario
+                else:
+                    item.asignado_a_vehiculo = vehiculo
+                item.save()
+                num_asignados_total += 1
+                asignados_de_este_tipo += 1
+                
+            if asignados_de_este_tipo > 0:
+                items_asignados_detalle.append(f"{asignados_de_este_tipo}x {Inventario.ITEM_CHOICES_DICT.get(item_nombre, item_nombre)}")
+
+        if errores:
+            for error in errores:
+                messages.warning(request, error)
+
+        if num_asignados_total > 0:
+            detalle_msg = ", ".join(items_asignados_detalle)
+            if tipo_asignacion == 'usuario':
+                Notificacion.objects.create(
+                    usuario=usuario,
+                    mensaje=f"Se te han asignado nuevos equipos: {detalle_msg}.",
+                    link="/inventario/"
+                )
+                messages.success(request, f'Se asignaron exitosamente a {usuario.get_full_name()}: {detalle_msg}.')
+            else:
+                messages.success(request, f'Se asignaron exitosamente al carro {vehiculo.nombre}: {detalle_msg}.')
+        elif not errores:
+            messages.error(request, 'No se pudo asignar ningún ítem.')
+            
+    return redirect('inventario')
+
+@login_required
+def inventario_group_edit_view(request):
+    if request.method != 'POST' or not puede_editar_inventario(request.user):
+        messages.error(request, 'Acción no permitida.')
+        return redirect('inventario')
+
+    compania_origen_id = request.POST.get('group_compania') or ''
+    if compania_origen_id and not compania_origen_id.isdigit():
+        messages.error(request, 'La compañía del grupo no es válida.')
+        return redirect('inventario')
+    compania_origen = Compania.objects.filter(pk=compania_origen_id).first() if compania_origen_id else None
+    if compania_origen_id and compania_origen is None:
+        messages.error(request, 'La compañía del grupo no existe.')
+        return redirect('inventario')
+    if not puede_acceder_inventario_compania(request.user, compania_origen):
+        messages.error(request, 'No tienes acceso al inventario de esta compañía.')
+        return redirect('inventario')
+
+    form = InventarioGroupEditForm(request.POST, user=request.user)
+    if form.is_valid():
+        nombre = request.POST.get('group_nombre')
+        ubicacion_actual = request.POST.get('group_ubicacion')
+        estado_actual = request.POST.get('group_estado')
+
+        with transaction.atomic():
+            items_a_actualizar = Inventario.objects.filter(
+                asignado_a__isnull=True,
+                asignado_a_vehiculo__isnull=True,
+                nombre=nombre,
+                ubicacion=ubicacion_actual,
+                estado=estado_actual,
+                compania_id=request.POST.get('group_compania') or None,
+                fecha_adquisicion=request.POST.get('group_fecha_adquisicion') or None,
+                valor=request.POST.get('group_valor') or None
+            )
+            items_existentes = list(items_a_actualizar.order_by('id'))
+            cantidad_actual = len(items_existentes)
+            cantidad_nueva = form.cleaned_data['cantidad']
+
+            if not items_existentes:
+                messages.warning(request, 'El grupo ya no existe o fue modificado por otro usuario.')
+                return redirect('inventario')
+
+            update_data = {
+                'nombre': form.cleaned_data['nombre'],
+                'ubicacion': form.cleaned_data['ubicacion'],
+                'estado': form.cleaned_data['estado']
+            }
+            compania_nueva = form.cleaned_data.get('compania') or compania_origen
+            fecha_nueva = form.cleaned_data.get('fecha_adquisicion') or items_existentes[0].fecha_adquisicion
+            valor_nuevo = form.cleaned_data.get('valor')
+            if valor_nuevo is None:
+                valor_nuevo = items_existentes[0].valor
+
+            update_data.update({
+                'compania': compania_nueva,
+                'fecha_adquisicion': fecha_nueva,
+                'valor': valor_nuevo,
+            })
+            items_a_actualizar.update(**update_data)
+
+            diferencia = cantidad_nueva - cantidad_actual
+            if diferencia > 0:
+                Inventario.objects.bulk_create([
+                    Inventario(
+                        **update_data,
+                        agregado_por=request.user,
+                    )
+                    for _ in range(diferencia)
+                ])
+            elif diferencia < 0:
+                ids_eliminar = [item.id for item in items_existentes[-abs(diferencia):]]
+                Inventario.objects.filter(id__in=ids_eliminar).delete()
+
+        messages.success(
+            request,
+            f'Grupo "{nombre}" actualizado. Cantidad: {cantidad_actual} → {cantidad_nueva} ítems.'
+        )
+    else:
+        messages.error(request, 'Error al actualizar el grupo de ítems. Revisa el formulario.')
+    
+    return redirect('inventario')
+
+@login_required
+def inventario_group_delete_view(request):
+    if request.method != 'POST' or not puede_editar_inventario(request.user):
+        messages.error(request, 'Acción no permitida.')
+        return redirect('inventario')
+
+    compania_origen_id = request.POST.get('group_compania') or ''
+    if compania_origen_id and not compania_origen_id.isdigit():
+        messages.error(request, 'La compañía del grupo no es válida.')
+        return redirect('inventario')
+    compania_origen = Compania.objects.filter(pk=compania_origen_id).first() if compania_origen_id else None
+    if compania_origen_id and compania_origen is None:
+        messages.error(request, 'La compañía del grupo no existe.')
+        return redirect('inventario')
+    if not puede_acceder_inventario_compania(request.user, compania_origen):
+        messages.error(request, 'No tienes acceso al inventario de esta compañía.')
+        return redirect('inventario')
+
+    Inventario.objects.filter(
+        asignado_a__isnull=True, 
+        nombre=request.POST.get('group_nombre'), 
+        ubicacion=request.POST.get('group_ubicacion'), 
+        estado=request.POST.get('group_estado'),
+        compania_id=request.POST.get('group_compania') or None,
+        fecha_adquisicion=request.POST.get('group_fecha_adquisicion') or None,
+        valor=request.POST.get('group_valor') or None
+    ).delete()
+    messages.success(request, f'El grupo de ítems "{request.POST.get("group_nombre")}" ha sido eliminado.')
+    return redirect('inventario')
+
+
+@login_required
+def inventario_global_delete_view(request):
+    if request.method != 'POST' or not puede_gestionar_inventario_global(request.user):
+        messages.error(request, 'No tienes permiso para eliminar ítems del inventario global.')
+        return redirect('inventario')
+
+    nombre = request.POST.get('nombre', '').strip()
+    if not nombre:
+        messages.error(request, 'No se indicó el ítem que se desea eliminar.')
+        return redirect('inventario')
+
+    items = Inventario.objects.filter(nombre=nombre)
+    cantidad = items.count()
+    if cantidad:
+        items.delete()
+        messages.success(request, f'Se eliminaron {cantidad} ítem(s) de "{nombre}" de todas las compañías.')
+    else:
+        messages.info(request, f'No se encontraron ítems de "{nombre}" para eliminar.')
+    return redirect('inventario')
+
+@login_required
+def scan_qr_page_view(request):
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.ver_escanear_qr):
+        messages.error(request, 'No tienes permiso para usar el Escáner QR.')
+        return redirect('dashboard')
+
+    return render(request, 'usuarios/scan_qr.html')
+
+@login_required
+def inventario_qr_lookup_view(request):
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.ver_escanear_qr):
+        return JsonResponse({'error': 'No tienes permisos para realizar esta acción.'}, status=403)
+
+    qr_content = request.GET.get('qr_content', '')
+    item_id = None
+    
+    # Primero, intentamos extraer el ID del formato "BOMBEROS-ITEM-ID:XX"
+    match = re.search(r'BOMBEROS-ITEM-ID:(\d+)', qr_content)
+    if match:
+        item_id = match.group(1)
+    # Si no, asumimos que el contenido del QR es directamente el ID (formato nuevo y más robusto)
+    elif qr_content.isdigit():
+        item_id = qr_content
+
+    if not item_id:
+        return JsonResponse({'error': 'Código QR no válido o no reconocido.'}, status=400)
+
+    try:
+        item = Inventario.objects.select_related('asignado_a', 'asignado_a_vehiculo').get(id=item_id)
+        if not item.asignado_a and not item.asignado_a_vehiculo:
+            return JsonResponse({'error': 'Este ítem está en bodega y no está asignado a ningún voluntario o carro.'}, status=404)
+
+        if item.asignado_a:
+            data = {
+                'tipo_asignacion': 'usuario',
+                'item_nombre': item.get_nombre_display(),
+                'usuario_nombre': item.asignado_a.get_full_name(),
+                'usuario_foto_url': item.asignado_a.foto_perfil.url if item.asignado_a.foto_perfil else None,
+                'usuario_iniciales': f"{item.asignado_a.nombre[0] if item.asignado_a.nombre else ''}{item.asignado_a.apellido[0] if item.asignado_a.apellido else ''}".upper(),
+            }
+        else:
+            data = {
+                'tipo_asignacion': 'vehiculo',
+                'item_nombre': item.get_nombre_display(),
+                'vehiculo_nombre': item.asignado_a_vehiculo.nombre,
+                'compania_nombre': item.asignado_a_vehiculo.compania.nombre,
+            }
+        return JsonResponse(data)
+    except Inventario.DoesNotExist:
+        return JsonResponse({'error': 'Ítem de inventario no encontrado.'}, status=404)
+
+@login_required
+def salidas_terreno_view(request):
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.ver_salidas_terreno):
+        messages.error(request, 'No tienes permiso para acceder a Salidas a Terreno.')
+        return redirect('dashboard')
+
+    # La vista principal ahora también maneja los errores del formulario de creación
+    if request.method == 'POST':
+        if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_salidas_terreno):
+            messages.error(request, 'No tienes permiso para registrar salidas.')
+            return redirect('salidas_terreno')
+            
+        form = SalidaTerrenoForm(request.POST, user=request.user)
+        if form.is_valid():
+            salida = form.save(commit=False)
+            salida.creado_por = request.user
+            salida.save()
+            form.save_m2m()
+            form.save_unit_attendance(salida)
+            messages.success(request, f'Salida a terreno por "{salida.motivo}" registrada.')
+            return redirect('salidas_terreno')
+        else:
+            messages.error(request, 'Error al registrar la salida. Por favor, revisa el formulario.')
+    else:
+        form = SalidaTerrenoForm(user=request.user)
+
+    # --- Lógica de Búsqueda y Filtros ---
+    query = request.GET.get('q')
+    usuario_id = request.GET.get('usuario')
+    motivo_filtro = request.GET.get('motivo')
+    ordenar_por = request.GET.get('ordenar_por', '-fecha_hora_salida')
+
+    salidas = SalidaTerreno.objects.select_related('personal_a_cargo').prefetch_related(
+        'unidades__compania',
+        Prefetch(
+            'asistencias_unidades',
+            queryset=SalidaTerrenoUnidad.objects.select_related('unidad').prefetch_related('asistentes'),
+        ),
+    ).all()
+
+    if query:
+        salidas = salidas.filter(
+            Q(motivo__icontains=query) |
+            Q(direccion__icontains=query) |
+            Q(unidades_involucradas__icontains=query) |
+            Q(unidades__nombre__icontains=query) |
+            Q(descripcion__icontains=query) |
+            Q(personal_a_cargo__nombre__icontains=query) |
+            Q(personal_a_cargo__apellido__icontains=query)
+        ).distinct()
+
+    if usuario_id:
+        salidas = salidas.filter(personal_a_cargo__id=usuario_id)
+        
+    if motivo_filtro:
+        salidas = salidas.filter(motivo=motivo_filtro)
+
+    valid_sorts = ['-fecha_hora_salida', 'fecha_hora_salida', 'motivo', '-motivo']
+    if ordenar_por in valid_sorts:
+        salidas = salidas.order_by(ordenar_por)
+
+    usuarios_con_salidas = Usuario.objects.filter(compania__isnull=False, salidas_a_cargo__isnull=False).distinct().order_by('nombre')
+    motivos_unicos = SalidaTerreno.objects.values_list('motivo', flat=True).distinct().order_by('motivo')
+    unidades_seleccionadas = form['unidades'].value() or []
+    unidades_seleccionadas = [str(getattr(unidad, 'pk', unidad)) for unidad in unidades_seleccionadas]
+    for salida in salidas:
+        detalles_asistencia = list(salida.asistencias_unidades.all())
+        salida.detalles_asistencia = detalles_asistencia
+        asistencia_visible = {}
+        for detalle in detalles_asistencia:
+            detalle.asistentes_visibles = [usuario for usuario in detalle.asistentes.all() if usuario.compania_id]
+            asistencia_visible[str(detalle.unidad_id)] = [usuario.pk for usuario in detalle.asistentes_visibles]
+        salida.asistencia_unidades_json = json.dumps(asistencia_visible)
+    usuarios_asistencia = [
+        {'id': usuario.pk, 'nombre': usuario.get_full_name()}
+        for usuario in Usuario.objects.miembros_activos().only('id', 'nombre', 'apellido').order_by('nombre', 'apellido')
+    ]
+    
+    context = {
+        'form': form, 
+        'unidades_seleccionadas': unidades_seleccionadas,
+        'usuarios_asistencia': usuarios_asistencia,
+        'salidas': salidas,
+        'usuarios_con_salidas': usuarios_con_salidas,
+        'motivos_unicos': motivos_unicos
+    }
+    return render(request, 'usuarios/salidas_terreno.html', context)
+
+@login_required
+def salida_terreno_edit_view(request, salida_id):
+    salida = get_object_or_404(SalidaTerreno, id=salida_id)
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_salidas_terreno):
+        messages.error(request, 'No tienes permiso para editar esta salida.')
+        return redirect('salidas_terreno')
+
+    if request.method == 'POST':
+        form = SalidaTerrenoForm(request.POST, instance=salida, user=request.user)
+        if form.is_valid():
+            form.save()
+            messages.success(request, f'Salida por "{salida.motivo}" actualizada exitosamente.')
+            return redirect('salidas_terreno')
+        else:
+            messages.error(request, 'Error al actualizar la salida. Revisa el formulario.')
+    return redirect('salidas_terreno')
+
+@login_required
+def salida_terreno_delete_view(request, salida_id):
+    salida = get_object_or_404(SalidaTerreno, id=salida_id)
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_salidas_terreno):
+        messages.error(request, 'No tienes permiso para eliminar esta salida.')
+        return redirect('salidas_terreno')
+
+    if request.method == 'POST':
+        salida_motivo = salida.motivo
+        salida.delete()
+        messages.success(request, f'Salida por "{salida_motivo}" eliminada exitosamente.')
+    return redirect('salidas_terreno')
+
+@login_required
+def emergencias_view(request):
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.ver_emergencias):
+        messages.error(request, 'No tienes permiso para acceder a Emergencias.')
+        return redirect('dashboard')
+
+    if request.method == 'POST':
+        if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_emergencias):
+            messages.error(request, 'No tienes permiso para registrar emergencias.')
+            return redirect('emergencias')
+            
+        form = EmergenciaForm(request.POST, request.FILES, user=request.user)
+        if form.is_valid():
+            emergencia = form.save(commit=False)
+            emergencia.creado_por = request.user
+            emergencia.registro_completado = 'guardar_incompleto' not in request.POST
+            emergencia.save()
+            form.save_m2m()
+            form.save_unit_attendance(emergencia)
+            messages.success(request, f'Emergencia "{emergencia.get_tipo_display()}" registrada exitosamente.')
+            return redirect('emergencias')
+        else:
+            messages.error(request, 'Error al registrar la emergencia. Por favor, revisa el formulario.')
+    else:
+        form = EmergenciaForm(user=request.user)
+
+    # --- Lógica de Búsqueda y Filtros ---
+    query = request.GET.get('q')
+    tipo_emergencia = request.GET.get('tipo')
+    fecha_inicio = request.GET.get('fecha_inicio')
+    fecha_fin = request.GET.get('fecha_fin')
+    usuario_id = request.GET.get('usuario')
+    ordenar_por = request.GET.get('ordenar_por', '-fecha_hora_alarma')
+
+    emergencias = Emergencia.objects.select_related('oficial_a_cargo').prefetch_related(
+        'asistentes',
+        Prefetch(
+            'unidades_asistencia',
+            queryset=EmergenciaUnidad.objects.select_related('unidad').prefetch_related('asistentes'),
+        ),
+    ).all()
+
+    if query:
+        emergencias = emergencias.filter(
+            Q(direccion__icontains=query) |
+            Q(descripcion__icontains=query) |
+            Q(unidades_despachadas__icontains=query)
+        )
+    
+    if tipo_emergencia:
+        emergencias = emergencias.filter(tipo=tipo_emergencia)
+    
+    if fecha_inicio:
+        emergencias = emergencias.filter(fecha_hora_alarma__gte=fecha_inicio)
+        
+    if fecha_fin:
+        emergencias = emergencias.filter(fecha_hora_alarma__lte=f"{fecha_fin} 23:59:59")
+
+    if usuario_id:
+        emergencias = emergencias.filter(oficial_a_cargo__id=usuario_id)
+
+    valid_sorts = ['-fecha_hora_alarma', 'fecha_hora_alarma', 'tipo', '-tipo']
+    if ordenar_por in valid_sorts:
+        emergencias = emergencias.order_by(ordenar_por)
+
+    usuarios_con_emergencias = Usuario.objects.filter(compania__isnull=False, emergencias_a_cargo__isnull=False).distinct().order_by('nombre')
+
+    unidades_disponibles = list(form.fields['unidades'].queryset)
+    unidades_por_nombre = {}
+    unidades_por_id = {unidad.pk: unidad for unidad in unidades_disponibles}
+    for unidad in unidades_disponibles:
+        unidades_por_nombre.setdefault(unidad.nombre.strip().casefold(), []).append(unidad.pk)
+
+    for emergencia in emergencias:
+        # Asistentes guardados antes de la asistencia por unidad quedan como
+        # asistencia histórica sin carro asignado.
+        emergencia.asistencia_anterior = [usuario for usuario in emergencia.asistentes.all() if usuario.compania_id]
+        detalles = list(emergencia.unidades_asistencia.all())
+        emergencia.detalles_unidades = detalles
+        for detalle in detalles:
+            detalle.asistentes_visibles = [usuario for usuario in detalle.asistentes.all() if usuario.compania_id]
+        asistencia = {
+            str(detalle.unidad_id): [usuario.pk for usuario in detalle.asistentes_visibles]
+            for detalle in detalles
+        }
+        unidades_ids = [detalle.unidad_id for detalle in detalles]
+        if not detalles:
+            for nombre in (emergencia.unidades_despachadas or '').replace(';', ',').split(','):
+                coincidencias = unidades_por_nombre.get(nombre.strip().casefold(), [])
+                if len(coincidencias) == 1:
+                    unidades_ids.append(coincidencias[0])
+                    asistencia[str(coincidencias[0])] = []
+        emergencia.unidades_ids = unidades_ids
+        emergencia.unidades_sin_asistencia = [
+            unidades_por_id[unidad_id].nombre
+            for unidad_id in unidades_ids
+            if unidad_id in unidades_por_id
+        ] if not detalles else []
+        emergencia.asistencia_unidades_json = json.dumps(asistencia)
+
+    unidades_seleccionadas = form['unidades'].value() or []
+    unidades_seleccionadas = [str(getattr(unidad, 'pk', unidad)) for unidad in unidades_seleccionadas]
+    usuarios_asistencia = [
+        {'id': usuario.pk, 'nombre': usuario.get_full_name()}
+        for usuario in Usuario.objects.miembros_activos().only('id', 'nombre', 'apellido').order_by('nombre', 'apellido')
+    ]
+
+    context = {
+        'form': form,
+        'emergencias': emergencias,
+        'usuarios_con_emergencias': usuarios_con_emergencias,
+        'unidades_seleccionadas': unidades_seleccionadas,
+        'usuarios_asistencia': usuarios_asistencia,
+    }
+    return render(request, 'usuarios/emergencias.html', context)
+
+@login_required
+def emergencia_edit_view(request, emergencia_id):
+    emergencia = get_object_or_404(Emergencia, id=emergencia_id)
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_emergencias):
+        messages.error(request, 'No tienes permiso para editar esta emergencia.')
+        return redirect('emergencias')
+
+    if request.method == 'POST':
+        form = EmergenciaForm(request.POST, request.FILES, instance=emergencia, user=request.user)
+        if form.is_valid():
+            emergencia = form.save(commit=False)
+            if 'guardar_completo' in request.POST:
+                emergencia.registro_completado = True
+            elif 'guardar_incompleto' in request.POST:
+                emergencia.registro_completado = False
+            emergencia.save()
+            form.save_m2m()
+            form.save_unit_attendance(emergencia)
+            messages.success(request, f'Emergencia "{emergencia.get_tipo_display()}" actualizada exitosamente.')
+        else:
+            messages.error(request, 'Error al actualizar la emergencia. Revisa el formulario.')
+    return redirect('emergencias')
+
+@login_required
+def emergencia_delete_view(request, emergencia_id):
+    emergencia = get_object_or_404(Emergencia, id=emergencia_id)
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_emergencias):
+        messages.error(request, 'No tienes permiso para eliminar esta emergencia.')
+        return redirect('emergencias')
+
+    if request.method == 'POST':
+        emergencia_tipo = emergencia.get_tipo_display()
+        emergencia.delete()
+        messages.success(request, f'Emergencia tipo "{emergencia_tipo}" eliminada exitosamente.')
+    return redirect('emergencias')
+
+def enviar_email_capacitacion(capacitacion, usuarios, accion="invitado al"):
+    emails = [u.email for u in usuarios if u.email]
+    if not emails:
+        return
+    
+    from django.utils import timezone
+    fecha_str = timezone.localtime(capacitacion.fecha_inicio).strftime('%d/%m/%Y %H:%M')
+    from django.conf import settings
+    
+    html_message = f'''
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="UTF-8"></head>
+    <body style="margin:0; padding:0; background-color:#f4f4f7; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f7; padding: 40px 0;">
+            <tr>
+                <td align="center">
+                    <table width="500" cellpadding="0" cellspacing="0" style="background:#ffffff; border-radius:12px; overflow:hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.08);">
+                        <tr>
+                            <td style="background: linear-gradient(135deg, #dc3545, #c82333); padding: 30px 40px; text-align: center;">
+                                <img src="/static/usuarios/demo-logo.svg" alt="Logo Bomberos Demo" style="max-width: 100px; border-radius: 8px; margin-bottom: 10px;">
+                                <h2 style="color:#ffffff; margin: 10px 0 0 0; font-size: 20px; font-weight: 600;">Compañía de Bomberos Demo</h2>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 40px;">
+                                <h1 style="color:#212529; font-size: 22px; text-align: center; margin: 0 0 10px 0;">Notificación de {capacitacion.tipo_actividad}</h1>
+                                <p style="color:#6c757d; font-size: 15px; text-align: center; margin: 0 0 30px 0; line-height: 1.6;">
+                                    Estimado miembro, has sido <strong>{accion}</strong> {capacitacion.tipo_actividad.lower()}: <br>
+                                    <strong style="color: #212529; font-size: 18px;">{capacitacion.nombre}</strong>
+                                </p>
+                                
+                                <div style="background: #f8f9fa; border-left: 4px solid #dc3545; padding: 15px 20px; margin-bottom: 25px;">
+                                    <p style="margin: 0 0 10px 0; font-size: 14px; color: #495057;"><strong>📅 Fecha y Hora:</strong> {fecha_str}</p>
+                                    <p style="margin: 0 0 10px 0; font-size: 14px; color: #495057;"><strong>📍 Lugar:</strong> {capacitacion.lugar}</p>
+                                    <p style="margin: 0; font-size: 14px; color: #495057;"><strong>👨‍🏫 Instructor:</strong> {capacitacion.instructor}</p>
+                                </div>
+                                
+                                <p style="color:#6c757d; font-size: 14px; margin: 0; line-height: 1.6;">
+                                    <strong>Descripción:</strong><br>
+                                    {capacitacion.descripcion if capacitacion.descripcion else 'Sin descripción detallada.'}
+                                </p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="background:#f8f9fa; padding: 20px 40px; text-align: center; border-top: 1px solid #e9ecef;">
+                                <p style="color:#adb5bd; font-size: 12px; margin: 0;">
+                                    Sistema de Gestión de Bomberos &copy; 2026<br>
+                                    Este es un correo automático, por favor no responder.
+                                </p>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+        </table>
+    </body>
+    </html>
+    '''
+    try:
+        from django.core.mail import EmailMultiAlternatives
+        msg = EmailMultiAlternatives(
+            subject=f"Notificación: {capacitacion.nombre}",
+            body=f"Has sido {accion} {capacitacion.tipo_actividad}: {capacitacion.nombre}. Fecha: {fecha_str}",
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=[],
+            bcc=emails
+        )
+        msg.attach_alternative(html_message, "text/html")
+        msg.send(fail_silently=True)
+    except Exception as e:
+        print(f"Error al enviar correo de capacitacion: {e}")
+
+@login_required
+def malla_curricular_view(request):
+    rol = getattr(request.user, 'rol', None)
+    puede_ver = bool(
+        request.user.is_superuser
+        or request.user.is_staff
+        or (rol and (rol.ver_malla_curricular or rol.editar_malla_curricular))
+    )
+    puede_editar = bool(
+        request.user.is_superuser
+        or request.user.is_staff
+        or (rol and rol.editar_malla_curricular)
+    )
+    if not puede_ver:
+        messages.error(request, 'No tienes permiso para ver la malla curricular.')
+        return redirect('dashboard')
+
+    if request.method == 'POST':
+        if not puede_editar:
+            messages.error(request, 'No tienes permiso para modificar la malla curricular.')
+            return redirect('malla_curricular')
+        ramo = get_object_or_404(CursoMalla, pk=request.POST.get('ramo_id'))
+        usuarios_validos = Usuario.objects.all()
+        ids_seleccionados = [
+            int(user_id) for user_id in request.POST.getlist('usuarios')
+            if user_id.isdigit()
+        ]
+        ramo.usuarios.set(usuarios_validos.filter(id__in=ids_seleccionados))
+        messages.success(request, f'Se actualizaron los voluntarios de “{ramo.nombre}”.')
+        return redirect('malla_curricular')
+
+    usuarios = list(
+        Usuario.objects.all().select_related('compania').order_by('nombre', 'apellido')
+    ) if puede_editar else []
+    usuarios_json = [
+        {
+            'id': usuario.id,
+            'nombre': usuario.get_full_name(),
+            'compania': usuario.compania.nombre if usuario.compania else 'Sin compañía',
+        }
+        for usuario in usuarios
+    ]
+
+    definiciones_niveles = [
+        ('Nivel postulante', 'postulante'),
+        ('Nivel inicial', 'inicial'),
+        ('Nivel operativo', 'operativo'),
+        ('Nivel profesional', 'profesional'),
+        ('Cursos complementarios', 'complementario'),
+    ]
+    niveles = []
+    for nombre, estilo in definiciones_niveles:
+        ramos = list(
+            CursoMalla.objects.filter(nivel=nombre)
+            .prefetch_related(Prefetch(
+                'usuarios',
+                queryset=Usuario.objects.select_related('compania').order_by('nombre', 'apellido'),
+            ))
+            .order_by('orden', 'nombre')
+        )
+        for ramo in ramos:
+            ramo.usuarios_actuales = list(ramo.usuarios.all())
+            ramo.usuario_inscrito = any(
+                usuario.id == request.user.id for usuario in ramo.usuarios_actuales
+            )
+            ramo.usuarios_actuales_json = json.dumps(
+                [usuario.id for usuario in ramo.usuarios_actuales]
+            )
+        niveles.append({
+            'nombre': nombre,
+            'estilo': estilo,
+            'ramos': ramos,
+            'total_inscritos': sum(len(ramo.usuarios_actuales) for ramo in ramos),
+        })
+
+    return render(request, 'usuarios/malla_curricular.html', {
+        'niveles': niveles,
+        'usuarios_json': usuarios_json,
+        'total_usuarios': Usuario.objects.count(),
+        'total_ramos': CursoMalla.objects.count(),
+        'puede_editar_malla': puede_editar,
+    })
+
+def capacitaciones_view(request):
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.ver_capacitaciones):
+        messages.error(request, 'No tienes permiso para acceder a Cursos.')
+        return redirect('dashboard')
+
+    if request.method == 'POST':
+        if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_capacitaciones):
+            messages.error(request, 'No tienes permiso para registrar capacitaciones.')
+            return redirect('capacitaciones')
+            
+        form = CapacitacionForm(request.POST, request.FILES)
+        if form.is_valid():
+            capacitacion = form.save(commit=False)
+            capacitacion.creado_por = request.user
+            capacitacion.save()
+            form.save_m2m()
+
+            enviar_invitacion = request.POST.get('enviar_invitacion') == 'on'
+            audiencia = request.POST.get('audiencia', 'general')
+            if enviar_invitacion:
+                if audiencia == 'general':
+                    usuarios_a_notificar = Usuario.objects.filter(
+                        is_active=True,
+                        compania__in=capacitacion.companias_invitadas.all()
+                    ) if capacitacion.companias_invitadas.exists() else Usuario.objects.none()
+                else:
+                    usuarios_a_notificar = capacitacion.asistentes.filter(compania__isnull=False)
+
+                notificaciones = []
+                for usuario in usuarios_a_notificar:
+                    mensaje = f"Has sido invitado/a a {capacitacion.get_tipo_actividad_display().lower()}: {capacitacion.nombre}."
+                    if capacitacion.cupos:
+                        mensaje += f" ¡Cupos limitados ({capacitacion.cupos})!"
+                    notificaciones.append(Notificacion(usuario=usuario, mensaje=mensaje, link='/capacitaciones/'))
+
+                if notificaciones:
+                    Notificacion.objects.bulk_create(notificaciones)
+                    enviar_email_capacitacion(capacitacion, usuarios_a_notificar, accion='invitado/a a')
+                    messages.success(request, f'{capacitacion.get_tipo_actividad_display()} "{capacitacion.nombre}" creado/a y se notificó a {len(notificaciones)} usuarios.')
+                else:
+                    messages.success(request, f'{capacitacion.get_tipo_actividad_display()} "{capacitacion.nombre}" creada; no hubo destinatarios para notificar.')
+            else:
+                messages.success(request, f'{capacitacion.get_tipo_actividad_display()} "{capacitacion.nombre}" creada exitosamente.')
+
+            tab = 'cursos' if capacitacion.tipo_actividad == 'Curso' else 'actividades'
+            return redirect(f'/capacitaciones/?tab={tab}')
+        messages.error(request, 'No se pudo guardar la actividad. Revisa los campos marcados.')
+    else:
+        form = CapacitacionForm()
+    
+    # Lógica de Visibilidad: Superusuarios y Editores ven todo. 
+    # Los demás solo ven los cursos de su compañía o a los que están invitados.
+    if request.user.is_superuser or (request.user.rol and request.user.rol.editar_capacitaciones):
+        capacitaciones = Capacitacion.objects.all()
+    else:
+        if request.user.compania:
+            capacitaciones = Capacitacion.objects.filter(
+                Q(creado_por=request.user) | Q(asistentes=request.user) |
+                Q(companias_invitadas=request.user.compania)
+            ).distinct()
+        else:
+            capacitaciones = Capacitacion.objects.filter(
+                Q(creado_por=request.user) | Q(asistentes=request.user)
+            ).distinct()
+
+    capacitaciones = capacitaciones.prefetch_related(
+        Prefetch(
+            'asistentes',
+            queryset=Usuario.objects.filter(compania__isnull=False).select_related('compania'),
+            to_attr='asistentes_visibles',
+        ),
+    )
+
+    reuniones = list(
+        capacitaciones.filter(tipo_actividad='Reunión')
+        .prefetch_related('companias_invitadas')
+        .order_by('-fecha_inicio')
+    )
+    for reunion in reuniones:
+        companias_participantes = {compania.id: compania for compania in reunion.companias_invitadas.all()}
+        if not companias_participantes:
+            companias_participantes = {
+                asistente.compania_id: asistente.compania
+                for asistente in reunion.asistentes_visibles
+                if asistente.compania_id and asistente.compania
+            }
+        reunion.companias_asistentes = sorted(companias_participantes.values(), key=lambda compania: compania.nombre.lower())
+        reunion.companias_filtro_ids = ','.join(str(compania_id) for compania_id in companias_participantes)
+    actividades_internas = list(
+        capacitaciones.exclude(tipo_actividad__in=['Curso', 'Reunión'])
+        .prefetch_related('companias_invitadas')
+        .select_related('creado_por__compania')
+    )
+    for actividad in actividades_internas:
+        companias_actividad = {compania.id: compania for compania in actividad.companias_invitadas.all()}
+        if not companias_actividad:
+            companias_actividad = {
+                asistente.compania_id: asistente.compania
+                for asistente in actividad.asistentes_visibles
+                if asistente.compania_id and asistente.compania
+            }
+        actividad.companias_actividad = sorted(companias_actividad.values(), key=lambda compania: compania.nombre.lower())
+        actividad.companias_filtro_ids = ','.join(str(compania_id) for compania_id in companias_actividad)
+    companias = Compania.objects.all().order_by('nombre')
+    usuarios_info = list(Usuario.objects.miembros_activos().values('id', 'compania_id'))
+    usuarios_companias = {u['id']: u['compania_id'] for u in usuarios_info}
+
+    # --- Lógica de Lista de Abono (Asistencias) ---
+    from django.db.models import Count
+    fecha_inicio_filtro = request.GET.get('fecha_inicio', '')
+    fecha_fin_filtro = request.GET.get('fecha_fin', '')
+    compania_filtro = request.GET.get('compania', '')
+    
+    base_filter = Q()
+    base_filter_em = Q()
+    if fecha_inicio_filtro:
+        base_filter &= Q(capacitaciones_asistidas__fecha_inicio__gte=fecha_inicio_filtro)
+        base_filter_em &= Q(emergencias_asistidas__fecha_hora_alarma__gte=fecha_inicio_filtro)
+    if fecha_fin_filtro:
+        # Añadir un día para incluir todo el día final (si se pasa solo la fecha)
+        base_filter &= Q(capacitaciones_asistidas__fecha_inicio__lte=f"{fecha_fin_filtro} 23:59:59")
+        base_filter_em &= Q(emergencias_asistidas__fecha_hora_alarma__lte=f"{fecha_fin_filtro} 23:59:59")
+
+    usuarios_abono = Usuario.objects.miembros_activos().select_related('compania')
+    if compania_filtro:
+        if compania_filtro.isdigit():
+            usuarios_abono = usuarios_abono.filter(compania_id=compania_filtro)
+
+    lista_abono = usuarios_abono.annotate(
+        total_cursos=Count('capacitaciones_asistidas', filter=base_filter & Q(capacitaciones_asistidas__tipo_actividad='Curso'), distinct=True),
+        total_reuniones=Count('capacitaciones_asistidas', filter=base_filter & Q(capacitaciones_asistidas__tipo_actividad='Reunión'), distinct=True),
+        total_talleres=Count('capacitaciones_asistidas', filter=base_filter & Q(capacitaciones_asistidas__tipo_actividad='Taller'), distinct=True),
+        total_charlas=Count('capacitaciones_asistidas', filter=base_filter & Q(capacitaciones_asistidas__tipo_actividad='Charla'), distinct=True),
+        total_visitas=Count('capacitaciones_asistidas', filter=base_filter & Q(capacitaciones_asistidas__tipo_actividad='Visita'), distinct=True),
+        total_otros=Count('capacitaciones_asistidas', filter=base_filter & Q(capacitaciones_asistidas__tipo_actividad='Otro'), distinct=True),
+        total_emergencias=Count('emergencias_asistidas', filter=base_filter_em, distinct=True),
+        total_general=Count('capacitaciones_asistidas', filter=base_filter, distinct=True) + Count('emergencias_asistidas', filter=base_filter_em, distinct=True)
+    ).order_by('nombre')
+
+    context = {
+        'form': form,
+        'capacitaciones': capacitaciones,
+        'cursos': capacitaciones.filter(tipo_actividad='Curso'),
+        'actividades_internas': actividades_internas,
+        'reuniones': reuniones,
+        'companias': companias,
+        'usuarios_companias_json': json.dumps(usuarios_companias),
+        'lista_abono': lista_abono,
+        'fecha_inicio_filtro': fecha_inicio_filtro,
+        'fecha_fin_filtro': fecha_fin_filtro,
+        'compania_filtro': compania_filtro
+    }
+    return render(request, 'usuarios/capacitaciones.html', context)
+
+
+@login_required
+def capacitacion_edit_view(request, capacitacion_id):
+    capacitacion = get_object_or_404(Capacitacion, id=capacitacion_id)
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_capacitaciones):
+        messages.error(request, 'No tienes permiso para editar este curso.')
+        return redirect('capacitaciones')
+
+    if request.method == 'POST':
+        if capacitacion.tipo_actividad == 'Reunión':
+            form = ReunionForm(request.POST, request.FILES, instance=capacitacion)
+        else:
+            form = CapacitacionForm(request.POST, request.FILES, instance=capacitacion)
+        if form.is_valid():
+            capacitacion = form.save()
+            
+            # Lógica de Notificaciones / Actualizaciones en Edición
+            enviar_invitacion = request.POST.get('enviar_invitacion') == 'on'
+            audiencia = request.POST.get('audiencia', 'general')
+
+            if enviar_invitacion:
+                if audiencia == 'general':
+                    usuarios_a_notificar = Usuario.objects.filter(is_active=True, compania__in=capacitacion.companias_invitadas.all()) if capacitacion.companias_invitadas.exists() else Usuario.objects.none()
+                else:
+                    usuarios_a_notificar = capacitacion.asistentes.filter(compania__isnull=False)
+                notificaciones = []
+                for u in usuarios_a_notificar:
+                    mensaje = f"Actualización de {capacitacion.get_tipo_actividad_display().lower()}: {capacitacion.nombre}."
+                    notificaciones.append(Notificacion(usuario=u, mensaje=mensaje, link=f"/capacitaciones/"))
+                
+                if notificaciones:
+                    Notificacion.objects.bulk_create(notificaciones)
+                    enviar_email_capacitacion(capacitacion, usuarios_a_notificar, accion="notificado/a de una actualización en")
+                    messages.success(request, f'{capacitacion.get_tipo_actividad_display()} "{capacitacion.nombre}" actualizada y se notificó a {len(notificaciones)} usuarios.')
+                else:
+                    messages.success(request, f'{capacitacion.get_tipo_actividad_display()} "{capacitacion.nombre}" actualizada exitosamente.')
+            else:
+                messages.success(request, f'{capacitacion.get_tipo_actividad_display()} "{capacitacion.nombre}" actualizada exitosamente.')
+            if capacitacion.tipo_actividad == 'Curso':
+                tab = 'cursos'
+            elif capacitacion.tipo_actividad == 'Reunión':
+                tab = 'reuniones'
+            else:
+                tab = 'actividades'
+            return redirect(f"{reverse('capacitaciones')}?tab={tab}")
+    else:
+        if capacitacion.tipo_actividad == 'Reunión':
+            form = ReunionForm(instance=capacitacion)
+        else:
+            form = CapacitacionForm(instance=capacitacion)
+
+    return render(request, 'usuarios/capacitacion_editar.html', {
+        'form': form,
+        'capacitacion': capacitacion,
+    })
+
+@login_required
+def capacitacion_delete_view(request, capacitacion_id):
+    capacitacion = get_object_or_404(Capacitacion, id=capacitacion_id)
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_capacitaciones):
+        messages.error(request, 'No tienes permiso para eliminar este curso.')
+        return redirect('capacitaciones')
+
+    if request.method == 'POST':
+        capacitacion_nombre = capacitacion.nombre
+        tipo_actividad = capacitacion.tipo_actividad
+        capacitacion.delete()
+        messages.success(request, f'{tipo_actividad} "{capacitacion_nombre}" eliminada exitosamente.')
+        tab = 'cursos' if tipo_actividad == 'Curso' else ('reuniones' if tipo_actividad == 'Reunión' else 'actividades')
+        return redirect(f"{reverse('capacitaciones')}?tab={tab}")
+    return redirect('capacitaciones')
+
+
+@login_required
+def mantenimiento_view(request):
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.ver_mantenimientos):
+        messages.error(request, 'No tienes permiso para acceder a Mantenimiento.')
+        return redirect('dashboard')
+
+    if request.method == 'POST':
+        if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_mantenimientos):
+            messages.error(request, 'No tienes permiso para registrar mantenimientos.')
+            return redirect('mantenimiento')
+            
+        form = MantenimientoForm(request.POST)
+        archivo_form = ArchivoMantenimientoForm(request.POST, request.FILES) # Para validación de archivos
+
+        if form.is_valid() and archivo_form.is_valid():
+            mantenimiento = form.save(commit=False)
+            es_nuevo = not mantenimiento.pk
+            
+            # --- LÓGICA DE CAJA: Descuento manual ---
+            caja_descuento = form.cleaned_data.get('caja_descuento')
+            if es_nuevo and mantenimiento.costo > 0 and caja_descuento and caja_descuento != 'sin_costo':
+                compania_caja = None if caja_descuento == 'general' else Compania.objects.filter(id=int(caja_descuento)).first()
+                mantenimiento.compania_caja = compania_caja
+                mantenimiento.save()
+                
+                CajaChica.objects.create(
+                    tipo='Egreso',
+                    tipo_cuenta=form.cleaned_data['tipo_cuenta'],
+                    monto=mantenimiento.costo,
+                    descripcion=f"Pago por mantenimiento de {mantenimiento.vehiculo} ({mantenimiento.tipo})",
+                    responsable=request.user,
+                    compania=compania_caja
+                )
+            else:
+                mantenimiento.save()
+            # --------------------------------------------------
+
+            files = request.FILES.getlist('archivos')
+            for f in files:
+                ArchivoMantenimiento.objects.create(mantenimiento=mantenimiento, archivo=f)
+
+            messages.success(request, f'Mantenimiento para "{mantenimiento.vehiculo}" registrado exitosamente.')
+            return redirect('mantenimiento')
+        else:
+            # Unir errores de ambos formularios para mostrarlos
+            error_list = {**form.errors, **archivo_form.errors}
+            messages.error(request, 'Error al registrar el mantenimiento. Por favor, revisa el formulario.')
+    else:
+        form = MantenimientoForm(initial={'vehiculo': request.GET.get('vehiculo', '')})
+        archivo_form = ArchivoMantenimientoForm()
+
+    # --- Lógica de Búsqueda y Filtros ---
+    query = request.GET.get('q')
+    tipo = request.GET.get('tipo')
+    estado = request.GET.get('estado')
+    usuario_id = request.GET.get('usuario')
+    ordenar_por = request.GET.get('ordenar_por', '-fecha')
+
+    # Pre-cargamos archivos y responsables para optimizar la carga de la tabla
+    mantenimientos = Mantenimiento.objects.select_related('responsable').prefetch_related('archivos').all()
+
+    if query:
+        mantenimientos = mantenimientos.filter(
+            Q(vehiculo__icontains=query) |
+            Q(descripcion__icontains=query)
+        )
+
+    if tipo:
+        mantenimientos = mantenimientos.filter(tipo=tipo)
+
+    if estado:
+        mantenimientos = mantenimientos.filter(estado=estado)
+
+    if usuario_id:
+        mantenimientos = mantenimientos.filter(responsable__id=usuario_id)
+
+    valid_sorts = ['-fecha', 'fecha', 'vehiculo']
+    if ordenar_por in valid_sorts:
+        mantenimientos = mantenimientos.order_by(ordenar_por)
+
+    usuarios_con_mantenimientos = Usuario.objects.filter(compania__isnull=False, mantenimientos_responsable__isnull=False).distinct().order_by('nombre')
+
+    rol = getattr(request.user, 'rol', None)
+    puede_registrar_ronda = request.user.is_superuser or bool(rol and (rol.editar_mantenimientos or rol.editar_inventario))
+    vehiculos_para_ronda = Vehiculo.objects.select_related('compania').order_by('compania__nombre', 'nombre')
+    if not request.user.is_superuser:
+        vehiculos_para_ronda = vehiculos_para_ronda.filter(compania=request.user.compania) if request.user.compania_id else Vehiculo.objects.none()
+
+    context = {
+        'form': form,
+        'archivo_form': archivo_form,
+        'mantenimientos': mantenimientos,
+        'usuarios_con_mantenimientos': usuarios_con_mantenimientos,
+        'puede_registrar_ronda': puede_registrar_ronda,
+        'vehiculos_para_ronda': vehiculos_para_ronda,
+    }
+    return render(request, 'usuarios/mantenimiento.html', context)
+
+@login_required
+def mantenimiento_edit_view(request, mantenimiento_id):
+    mantenimiento = get_object_or_404(Mantenimiento, id=mantenimiento_id)
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_mantenimientos):
+        messages.error(request, 'No tienes permiso para editar este mantenimiento.')
+        return redirect('mantenimiento')
+
+    if request.method == 'POST':
+        form = MantenimientoForm(request.POST, instance=mantenimiento)
+        archivo_form = ArchivoMantenimientoForm(request.POST, request.FILES)
+        if form.is_valid() and archivo_form.is_valid():
+            mantenimiento_actualizado = form.save()
+            
+            files = request.FILES.getlist('archivos')
+            for f in files:
+                ArchivoMantenimiento.objects.create(mantenimiento=mantenimiento_actualizado, archivo=f)
+                
+            messages.success(request, f'Mantenimiento para "{mantenimiento_actualizado.vehiculo}" actualizado exitosamente.')
+        else:
+            messages.error(request, 'Error al actualizar el mantenimiento. Revisa el formulario.')
+    return redirect('mantenimiento')
+
+@login_required
+def mantenimiento_delete_view(request, mantenimiento_id):
+    mantenimiento = get_object_or_404(Mantenimiento, id=mantenimiento_id)
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_mantenimientos):
+        messages.error(request, 'No tienes permiso para eliminar este mantenimiento.')
+        return redirect('mantenimiento')
+    if request.method == 'POST':
+        mantenimiento_vehiculo = mantenimiento.vehiculo
+        mantenimiento.delete()
+        messages.success(request, f'Mantenimiento para "{mantenimiento_vehiculo}" eliminado exitosamente.')
+    return redirect('mantenimiento')
+
+@login_required
+def caja_chica_view(request):
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.ver_caja_chica):
+        messages.error(request, 'No tienes permiso para acceder a Caja.')
+        return redirect('dashboard')
+
+    if request.method == 'POST':
+        if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_caja_chica):
+            messages.error(request, 'No tienes permiso para registrar movimientos.')
+            return redirect('caja_chica')
+            
+        form = CajaChicaForm(request.POST, request.FILES, user=request.user)
+        if form.is_valid():
+            movimiento = form.save(commit=False)
+            movimiento.responsable = request.user
+            if not request.user.is_superuser and request.user.compania:
+                movimiento.compania = request.user.compania
+            movimiento.save()
+            messages.success(request, f'{movimiento.get_tipo_display()} de CLP ${movimiento.monto:,.0f} registrado exitosamente.')
+            return redirect('caja_chica')
+        else:
+            messages.error(request, 'Error al registrar el movimiento. Revisa el formulario.')
+    else:
+        form = CajaChicaForm(user=request.user)
+
+    movimientos = CajaChica.objects.all()
+
+    if not request.user.is_superuser:
+        if request.user.compania:
+            movimientos = movimientos.filter(compania=request.user.compania)
+            nombre_caja = request.user.compania.nombre
+            filtro_compania = str(request.user.compania.id)
+        else:
+            movimientos = CajaChica.objects.none()
+            nombre_caja = "Sin Compañía"
+            filtro_compania = "ninguna"
+    else:
+        filtro_compania = request.GET.get('compania', 'todas')
+        
+        if filtro_compania == 'general':
+            movimientos = movimientos.filter(compania__isnull=True)
+            nombre_caja = "Caja General"
+        elif filtro_compania != 'todas' and filtro_compania.isdigit():
+            movimientos = movimientos.filter(compania_id=filtro_compania)
+            try:
+                nombre_caja = Compania.objects.get(id=filtro_compania).nombre
+            except:
+                nombre_caja = "Caja"
+        else:
+            nombre_caja = "Todas las Cajas (General + Compañía)"
+    
+    # Calcular saldo
+    saldo_actual = movimientos.aggregate(
+        saldo=Sum(Case(
+            When(tipo='Ingreso', then=F('monto')),
+            When(tipo='Egreso', then=-F('monto')),
+            output_field=DecimalField()
+        ))
+    )['saldo'] or 0.00
+
+    saldo_caja_propia = movimientos.filter(tipo_cuenta='caja_propia').aggregate(
+        saldo=Sum(Case(When(tipo='Ingreso', then=F('monto')), When(tipo='Egreso', then=-F('monto')), output_field=DecimalField()))
+    )['saldo'] or 0.00
+    saldo_cuenta_bancaria = movimientos.filter(tipo_cuenta='cuenta_bancaria').aggregate(
+        saldo=Sum(Case(When(tipo='Ingreso', then=F('monto')), When(tipo='Egreso', then=-F('monto')), output_field=DecimalField()))
+    )['saldo'] or 0.00
+
+    companias = Compania.objects.all() if request.user.is_superuser else (Compania.objects.filter(id=request.user.compania.id) if request.user.compania else None)
+
+    context = {'form': form, 'movimientos': movimientos, 'saldo_actual': saldo_actual, 'saldo_caja_propia': saldo_caja_propia, 'saldo_cuenta_bancaria': saldo_cuenta_bancaria, 'companias': companias, 'filtro_compania': filtro_compania, 'nombre_caja': nombre_caja}
+    return render(request, 'usuarios/caja_chica.html', context)
+
+@login_required
+def caja_chica_edit_view(request, movimiento_id):
+    movimiento = get_object_or_404(CajaChica, id=movimiento_id)
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_caja_chica):
+        messages.error(request, 'No tienes permiso para editar este movimiento.')
+        return redirect('caja_chica')
+    if not pertenencia_compania(request.user, movimiento.compania):
+        messages.error(request, 'No tienes acceso a la caja de esta compañía.')
+        return redirect('caja_chica')
+
+    if request.method == 'POST':
+        form = CajaChicaForm(request.POST, request.FILES, instance=movimiento, user=request.user)
+        if form.is_valid():
+            form.save()
+            messages.success(request, 'Movimiento actualizado exitosamente.')
+        else:
+            messages.error(request, 'Error al actualizar el movimiento. Revisa el formulario.')
+    return redirect('caja_chica')
+
+@login_required
+def caja_chica_delete_view(request, movimiento_id):
+    movimiento = get_object_or_404(CajaChica, id=movimiento_id)
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_caja_chica):
+        messages.error(request, 'No tienes permiso para eliminar este movimiento.')
+        return redirect('caja_chica')
+    if not pertenencia_compania(request.user, movimiento.compania):
+        messages.error(request, 'No tienes acceso a la caja de esta compañía.')
+        return redirect('caja_chica')
+    if request.method == 'POST':
+        movimiento_desc = movimiento.descripcion
+        movimiento.delete()
+        messages.success(request, f'Movimiento "{movimiento_desc}" eliminado exitosamente.')
+    return redirect('caja_chica')
+
+@login_required
+def administracion_view(request):
+    # Restringimos el acceso a superusuarios o quienes tengan permiso de ver avisos
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.ver_avisos):
+        messages.error(request, 'No tienes permiso para acceder a esta sección.')
+        return redirect('dashboard')
+
+    # Formularios para los modales
+    user_creation_form = AdminUserCreationForm()
+    # Pasamos el request para manejar errores en el formulario de edición
+    user_change_form = AdminUserChangeForm(request=request)
+    rol_form = RolForm()
+    compania_form = CompaniaForm()
+    aviso_form = AvisoForm()
+    avisos = Aviso.objects.all().prefetch_related('destinatarios', 'destinatarios__usuario')
+
+    # Búsqueda y filtrado de usuarios
+    query = request.GET.get('q')
+    base_users = Usuario.objects.all()
+
+    if query:
+        base_users = base_users.filter(
+            Q(nombre__icontains=query) | 
+            Q(apellido__icontains=query) | 
+            Q(email__icontains=query)
+        )
+
+    roles = Rol.objects.all().order_by('nombre')
+    companias = Compania.objects.all().order_by('nombre')
+    pending_users = Usuario.objects.filter(is_active=False).order_by('-date_joined')
+
+    # Separamos los usuarios en activos y pendientes de aprobación
+    active_users = base_users.filter(is_active=True).order_by('nombre')
+
+    context = {
+        'active_users': active_users,
+        'pending_users': pending_users,
+        'roles': roles, 
+        'companias': companias,
+        'user_creation_form': user_creation_form,
+        'user_change_form': user_change_form,
+        'rol_form': rol_form,
+        'compania_form': compania_form,
+        'aviso_form': aviso_form,
+        'avisos': avisos,
+        'edit_form_user_id': request.session.pop('edit_form_user_id', None) # Para saber qué modal de edición abrir si hay error en la edición de usuario
+    }
+    return render(request, 'usuarios/administracion.html', context)
+
+@admin_required
+def user_create_view(request):
+    if not request.user.is_superuser:
+        messages.error(request, 'Acción no permitida.')
+        return redirect('dashboard')
+    
+    if request.method == 'POST':
+        form = AdminUserCreationForm(request.POST)
+        if form.is_valid():
+            form.save()
+            # El RUT se guarda desde el formulario
+            messages.success(request, 'Usuario creado exitosamente.')
+            return redirect('administracion')
+        else:
+            messages.error(request, 'Error al crear el usuario. Por favor, revisa los errores en el formulario.')
+            
+            # Recuperar contexto para re-renderizar la página con el formulario inválido
+            user_change_form = AdminUserChangeForm(request=request)
+            rol_form = RolForm()
+            compania_form = CompaniaForm()
+            
+            base_users = Usuario.objects.all()
+            roles = Rol.objects.all().order_by('nombre')
+            companias = Compania.objects.all().order_by('nombre')
+            pending_users = Usuario.objects.filter(is_active=False).order_by('-date_joined')
+            active_users = base_users.filter(is_active=True).order_by('nombre')
+
+            context = {
+                'active_users': active_users,
+                'pending_users': pending_users,
+                'roles': roles, 
+                'companias': companias,
+                'user_creation_form': form, # Mandamos el formulario con los errores
+                'user_change_form': user_change_form,
+                'rol_form': rol_form,
+                'compania_form': compania_form,
+            }
+            return render(request, 'usuarios/administracion.html', context)
+    return redirect('administracion')
+
+@admin_required
+def user_edit_view(request, user_id):
+    if not request.user.is_superuser:
+        messages.error(request, 'Acción no permitida.')
+        return redirect('dashboard')
+
+    user_to_edit = get_object_or_404(Usuario, id=user_id)
+    if request.method == 'POST':
+        # Pasamos el request al formulario para que pueda usarlo si es necesario
+        form = AdminUserChangeForm(request.POST, instance=user_to_edit, request=request)
+        if form.is_valid():
+            form.save()
+            messages.success(request, f'Usuario "{user_to_edit.get_full_name()}" actualizado exitosamente.')
+            return redirect('administracion')
+        else:
+            messages.error(request, 'Error al actualizar el usuario. Por favor, revisa el formulario.')
+            
+            # --- Gather all context needed by administracion.html to re-render on error ---
+            user_creation_form = AdminUserCreationForm()
+            rol_form = RolForm()
+            compania_form = CompaniaForm()
+            
+            base_users = Usuario.objects.all()
+
+            roles = Rol.objects.all().order_by('nombre')
+            companias = Compania.objects.all().order_by('nombre')
+            pending_users = Usuario.objects.filter(is_active=False).order_by('-date_joined')
+            active_users = base_users.filter(is_active=True).order_by('nombre')
+
+            context = {
+                'active_users': active_users,
+                'pending_users': pending_users,
+                'roles': roles, 
+                'companias': companias,
+                'user_creation_form': user_creation_form,
+                'user_change_form': form, # Pass the invalid form instance
+                'rol_form': rol_form,
+                'compania_form': compania_form,
+                'edit_form_user_id': user_id # Pass the user ID to re-open the modal
+            }
+            return render(request, 'usuarios/administracion.html', context)
+
+    return redirect('administracion')
+
+@admin_required
+def user_approve_view(request, user_id):
+    if not request.user.is_superuser:
+        messages.error(request, 'Acción no permitida.')
+        return redirect('dashboard')
+
+    if request.method == 'POST':
+        user_to_approve = get_object_or_404(Usuario, id=user_id)
+        user_to_approve.is_active = True
+        user_to_approve.save()
+
+        # Limpiar notificaciones pendientes relacionadas a este usuario para todos los admins
+        Notificacion.objects.filter(
+            mensaje=f"Nueva solicitud de registro: {user_to_approve.get_full_name()}",
+            leida=False
+        ).update(leida=True)
+
+        messages.success(request, f'Usuario "{user_to_approve.get_full_name()}" ha sido aprobado y ahora puede iniciar sesión.')
+    return redirect('administracion')
+
+@admin_required
+def user_delete_view(request, user_id):
+    if request.method == 'POST' and request.user.is_superuser:
+        user_to_delete = get_object_or_404(Usuario, id=user_id)
+        messages.success(request, f'Usuario "{user_to_delete.get_full_name()}" eliminado.')
+        
+        # Limpiar notificaciones pendientes relacionadas a este usuario para todos los admins
+        Notificacion.objects.filter(
+            mensaje=f"Nueva solicitud de registro: {user_to_delete.get_full_name()}",
+            leida=False
+        ).update(leida=True)
+        
+        user_to_delete.delete()
+    return redirect('administracion')
+
+@admin_required
+def rol_create_view(request):
+    if not request.user.is_superuser:
+        messages.error(request, 'Acción no permitida.')
+        return redirect('dashboard')
+    
+    if request.method == 'POST':
+        form = RolForm(request.POST)
+        if form.is_valid():
+            form.save()
+            messages.success(request, 'Rol creado exitosamente.')
+        else:
+            messages.error(request, f'Error al crear el rol: {form.errors.as_text()}')
+    return redirect('administracion')
+
+@admin_required
+def rol_edit_view(request, rol_id):
+    if not request.user.is_superuser:
+        messages.error(request, 'Acción no permitida.')
+        return redirect('dashboard')
+
+    rol = get_object_or_404(Rol, id=rol_id)
+    if request.method == 'POST':
+        form = RolForm(request.POST, instance=rol)
+        if form.is_valid():
+            form.save()
+            messages.success(request, f'Rol "{rol.nombre}" actualizado exitosamente.')
+        else:
+            messages.error(request, f'Error al actualizar el rol: {form.errors.as_text()}')
+    return redirect('administracion')
+
+@admin_required
+def rol_delete_view(request, rol_id):
+    if request.method == 'POST' and request.user.is_superuser:
+        rol = get_object_or_404(Rol, id=rol_id)
+        messages.success(request, f'Rol "{rol.nombre}" eliminado.')
+        rol.delete()
+    return redirect('administracion')
+
+@login_required
+def aviso_create_view(request):
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.editar_avisos):
+        messages.error(request, 'Acción no permitida.')
+        return redirect('dashboard')
+    
+    if request.method == 'POST':
+        form = AvisoForm(request.POST)
+        if form.is_valid():
+            aviso = form.save(commit=False)
+            aviso.creado_por = request.user
+            aviso.save()
+            
+            usuarios = form.cleaned_data['usuarios']
+            destinatarios = []
+            for u in usuarios:
+                destinatarios.append(AvisoDestinatario(aviso=aviso, usuario=u))
+                
+            AvisoDestinatario.objects.bulk_create(destinatarios)
+            destinatarios_db = AvisoDestinatario.objects.filter(aviso=aviso)
+            
+            notificaciones = []
+            for dest in destinatarios_db:
+                notificaciones.append(Notificacion(
+                    usuario=dest.usuario,
+                    mensaje=f"📢 Aviso del Administrador: {aviso.titulo}",
+                    link=f"/avisos/{dest.id}/leer/"
+                ))
+            Notificacion.objects.bulk_create(notificaciones)
+
+            avisos_por_correo = []
+            asunto = f"Aviso: {' '.join(aviso.titulo.splitlines())}"
+            for destinatario in destinatarios_db.select_related('usuario'):
+                if not destinatario.usuario.email:
+                    continue
+                enlace = request.build_absolute_uri(reverse('aviso_leer', args=[destinatario.id]))
+                nombre = escape(destinatario.usuario.get_full_name() or destinatario.usuario.get_username())
+                titulo_html = escape(aviso.titulo).replace('\n', '<br>')
+                mensaje_html = escape(aviso.mensaje).replace('\n', '<br>')
+                cuerpo_texto = (
+                    f"Hola {destinatario.usuario.get_full_name() or destinatario.usuario.get_username()},\n\n"
+                    f"{aviso.titulo}\n\n{aviso.mensaje}\n\n"
+                    f"Abre el aviso en el sistema: {enlace}\n\n"
+                    "Sistema de Gestión de Bomberos — Compañía de Bomberos Demo"
+                )
+                cuerpo_html = f'''<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#f3f5f8;font-family:Arial,Helvetica,sans-serif;color:#263238;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3f5f8;padding:32px 12px;">
+    <tr><td align="center">
+      <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="width:100%;max-width:600px;background:#ffffff;border:1px solid #e2e6ea;border-radius:12px;overflow:hidden;">
+        <tr><td style="background:#c9233a;padding:22px 30px;color:#ffffff;text-align:center;">
+          <img src="/static/usuarios/demo-logo.svg" alt="Logo de la Compañía de Bomberos Demo" width="68" height="68" style="display:block;width:68px;height:68px;object-fit:contain;margin:0 auto 14px;background:#ffffff;border-radius:50%;padding:5px;">
+          <div style="font-size:12px;letter-spacing:1.2px;text-transform:uppercase;opacity:.9;">Compañía de Bomberos Demo</div>
+          <div style="font-size:21px;font-weight:700;margin-top:6px;">Sistema de Gestión de Bomberos</div>
+        </td></tr>
+        <tr><td style="padding:30px;">
+          <p style="font-size:15px;margin:0 0 18px;">Hola {nombre},</p>
+          <div style="border-left:4px solid #c9233a;background:#fff7f8;padding:16px 18px;border-radius:4px;margin:0 0 22px;">
+            <div style="font-size:19px;line-height:1.35;font-weight:700;color:#252a30;">{titulo_html}</div>
+          </div>
+          <div style="font-size:15px;line-height:1.7;color:#4b5563;">{mensaje_html}</div>
+          <table role="presentation" cellspacing="0" cellpadding="0" style="margin:28px 0 20px;"><tr><td bgcolor="#c9233a" style="border-radius:6px;">
+            <a href="{escape(enlace)}" style="display:inline-block;padding:13px 22px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;">Ver aviso en el sistema</a>
+          </td></tr></table>
+          <p style="font-size:12px;line-height:1.6;color:#7b8490;margin:0;">Si el botón no funciona, copia este enlace en tu navegador:<br><a href="{escape(enlace)}" style="color:#b51f34;word-break:break-all;">{escape(enlace)}</a></p>
+        </td></tr>
+        <tr><td style="border-top:1px solid #edf0f2;padding:17px 30px;background:#fafbfc;color:#7b8490;font-size:12px;line-height:1.5;">
+          Mensaje automático del Sistema de Gestión de Bomberos.<br>Por favor, no respondas a este correo.
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>'''
+                correo = EmailMultiAlternatives(asunto, cuerpo_texto, settings.DEFAULT_FROM_EMAIL, [destinatario.usuario.email])
+                correo.attach_alternative(cuerpo_html, 'text/html')
+                avisos_por_correo.append(correo)
+
+            if avisos_por_correo:
+                try:
+                    correos_enviados = sum(correo.send(fail_silently=False) for correo in avisos_por_correo)
+                except Exception:
+                    logger.exception('No se pudieron enviar por correo todos los avisos para el aviso %s', aviso.pk)
+                    messages.warning(request, 'El aviso quedó publicado en el sistema, pero hubo un problema enviando los correos.')
+                else:
+                    if correos_enviados == len(avisos_por_correo):
+                        messages.success(request, 'Aviso enviado por correo y notificado en el sistema a los destinatarios seleccionados.')
+                    else:
+                        messages.warning(request, 'El aviso quedó publicado en el sistema, pero no se enviaron todos los correos.')
+            else:
+                messages.success(request, 'Aviso enviado en el sistema. Los destinatarios seleccionados no tienen correo registrado.')
+        else:
+            messages.error(request, 'Error al enviar el aviso.')
+    return redirect('administracion')
+
+@login_required
+def aviso_leer_view(request, destinatario_id):
+    destinatario = get_object_or_404(AvisoDestinatario, id=destinatario_id, usuario=request.user)
+    if not destinatario.leido:
+        destinatario.leido = True
+        destinatario.fecha_lectura = timezone.now()
+        destinatario.save()
+        
+    return render(request, 'usuarios/aviso_leer.html', {'aviso': destinatario.aviso})
+
+@admin_required
+def compania_create_view(request):
+    if not request.user.is_superuser:
+        messages.error(request, 'Acción no permitida.')
+        return redirect('dashboard')
+    
+    if request.method == 'POST':
+        form = CompaniaForm(request.POST, request.FILES)
+        if form.is_valid():
+            compania = form.save()
+            
+            if form.cleaned_data.get('generar_inventario'):
+                items_iniciales = [
+                    ('Traje estructural', 20),
+                    ('Casco de bombero', 20),
+                    ('Botas estructurales', 20),
+                    ('Guantes de bombero', 20),
+                    ('Equipo de respiración autónoma (ERA)', 15),
+                    ('Manguera de 1.5 pulgadas', 10),
+                    ('Manguera de 2.5 pulgadas', 5),
+                    ('Pitón / Lanza de agua', 5),
+                    ('Herramienta Halligan', 2),
+                ]
+                for item_nombre, cantidad in items_iniciales:
+                    for _ in range(cantidad):
+                        Inventario.objects.create(
+                            nombre=item_nombre, compania=compania,
+                            ubicacion='Bodega', estado='Bueno'
+                        )
+                messages.success(request, 'Compañía creada y su inventario base fue añadido automáticamente.')
+            else:
+                messages.success(request, 'Compañía creada exitosamente (sin inventario base).')
+        else:
+            messages.error(request, f'Error al crear la compañía: {form.errors.as_text()}')
+    return redirect('administracion')
+
+@admin_required
+def compania_edit_view(request, compania_id):
+    if not request.user.is_superuser:
+        messages.error(request, 'Acción no permitida.')
+        return redirect('dashboard')
+
+    compania = get_object_or_404(Compania, id=compania_id)
+    if request.method == 'POST':
+        form = CompaniaForm(request.POST, request.FILES, instance=compania)
+        if form.is_valid():
+            form.save()
+            messages.success(request, f'Compañía "{compania.nombre}" actualizada exitosamente.')
+        else:
+            messages.error(request, f'Error al actualizar la compañía: {form.errors.as_text()}')
+    return redirect('administracion')
+
+@admin_required
+def compania_delete_view(request, compania_id):
+    if request.method == 'POST' and request.user.is_superuser:
+        compania = get_object_or_404(Compania, id=compania_id)
+        messages.success(request, f'Compañía "{compania.nombre}" eliminada.')
+        compania.delete()
+    return redirect('administracion')
+
+@login_required
+def perfil_view(request):
+    user = request.user
+    perfil_form = PerfilForm(instance=user)
+    password_form = PasswordChangeForm(user)
+
+    if request.method == 'POST':
+        if 'update_profile' in request.POST:
+            perfil_form = PerfilForm(request.POST, request.FILES, instance=user)
+            if perfil_form.is_valid():
+                perfil_form.save()
+                messages.success(request, 'Tu perfil ha sido actualizado exitosamente.')
+                return redirect('perfil')
+            else:
+                messages.error(request, 'Por favor, corrige los errores al actualizar el perfil.')
+
+
+    capacitaciones_asistidas = user.capacitaciones_asistidas.all()
+    equipos_asignados = user.inventario_asignado.all()
+    
+    context = {
+        'perfil_form': perfil_form,
+'user': user, 
+        'capacitaciones_asistidas': capacitaciones_asistidas,
+        'equipos_asignados': equipos_asignados
+    }
+    return render(request, 'usuarios/perfil.html', context)
+
+@login_required
+def api_notificaciones(request):
+    # Filtramos para mostrar y enviar al frontend SOLO las notificaciones no leídas
+    notifs = request.user.notificaciones_recibidas.filter(leida=False)[:10]
+    data = [{
+        'id': n.id,
+        'mensaje': n.mensaje,
+        'leida': n.leida,
+        'link': n.link,
+        'fecha': n.fecha_creacion.strftime("%d/%m %H:%M")
+    } for n in notifs]
+    no_leidas = request.user.notificaciones_recibidas.filter(leida=False).count()
+    return JsonResponse({'notificaciones': data, 'no_leidas': no_leidas})
+
+@login_required
+def aviso_delete_view(request, aviso_id):
+    if request.method == 'POST' and (request.user.is_superuser or (request.user.rol and request.user.rol.editar_avisos)):
+        aviso = get_object_or_404(Aviso, id=aviso_id)
+        messages.success(request, f'Aviso "{aviso.titulo}" eliminado exitosamente.')
+        aviso.delete()
+    return redirect('administracion')
+
+@login_required
+def marcar_notificacion_leida(request, notif_id):
+    notif = get_object_or_404(Notificacion, id=notif_id, usuario=request.user)
+    notif.leida = True
+    notif.save()
+    if notif.link:
+        return redirect(notif.link)
+    return redirect('dashboard')
+
+def password_reset_request_view(request):
+    if request.method == 'POST':
+        form = PasswordResetRequestForm(request.POST)
+        if form.is_valid():
+            email = form.cleaned_data['email']
+            user = Usuario.objects.filter(email=email).first()
+            if user:
+                codigo = str(random.randint(100000, 999999))
+                PasswordResetCode.objects.filter(usuario=user, usado=False).update(usado=True)
+                PasswordResetCode.objects.create(usuario=user, codigo=codigo)
+                try:
+                    html_message = f'''
+                    <!DOCTYPE html>
+                    <html>
+                    <head><meta charset="UTF-8"></head>
+                    <body style="margin:0; padding:0; background-color:#f4f4f7; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+                        <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f7; padding: 40px 0;">
+                            <tr>
+                                <td align="center">
+                                    <table width="500" cellpadding="0" cellspacing="0" style="background:#ffffff; border-radius:12px; overflow:hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.08);">
+                                        <tr>
+                                            <td style="background: linear-gradient(135deg, #dc3545, #c82333); padding: 30px 40px; text-align: center;">
+                                                <img src="/static/usuarios/demo-logo.svg" alt="Logo Bomberos Demo" style="max-width: 100px; border-radius: 8px; margin-bottom: 10px;">
+                                                <h2 style="color:#ffffff; margin: 10px 0 0 0; font-size: 20px; font-weight: 600;">Compañía de Bomberos Demo</h2>
+                                            </td>
+                                        </tr>
+                                        <tr>
+                                            <td style="padding: 40px;">
+                                                <h1 style="color:#212529; font-size: 24px; text-align: center; margin: 0 0 10px 0;">Código de Verificación</h1>
+                                                <p style="color:#6c757d; font-size: 14px; text-align: center; margin: 0 0 30px 0; line-height: 1.6;">
+                                                    Hola <strong>{user.nombre}</strong>, hemos recibido una solicitud para restablecer la contraseña de tu cuenta.
+                                                </p>
+                                                <table width="100%" cellpadding="0" cellspacing="0">
+                                                    <tr>
+                                                        <td align="center">
+                                                            <div style="background: #f8f9fa; border: 2px dashed #dc3545; border-radius: 12px; padding: 20px 30px; display: inline-block;">
+                                                                <span style="font-size: 36px; font-weight: 700; letter-spacing: 12px; color: #dc3545; font-family: monospace;">{codigo}</span>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                </table>
+                                                <p style="color:#6c757d; font-size: 13px; text-align: center; margin: 25px 0 0 0; line-height: 1.6;">
+                                                    Este código es válido por <strong>15 minutos</strong>.<br>
+                                                    Si no solicitaste este cambio, puedes ignorar este correo con total seguridad.
+                                                </p>
+                                            </td>
+                                        </tr>
+                                        <tr>
+                                            <td style="background:#f8f9fa; padding: 20px 40px; text-align: center; border-top: 1px solid #e9ecef;">
+                                                <p style="color:#adb5bd; font-size: 12px; margin: 0;">
+                                                    Sistema de Gestión de Bomberos &copy; 2026<br>
+                                                    Este es un correo automático, por favor no responder.
+                                                </p>
+                                            </td>
+                                        </tr>
+                                    </table>
+                                </td>
+                            </tr>
+                        </table>
+                    </body>
+                    </html>
+                    '''
+                    send_mail(
+                        'Código de Recuperación - Sistema Bomberos',
+                        f'Hola {user.nombre}, tu código de verificación es: {codigo}. Válido por 15 minutos.',
+                        settings.DEFAULT_FROM_EMAIL,
+                        [email],
+                        fail_silently=False,
+                        html_message=html_message,
+                    )
+                except Exception as e:
+                    logger.error(f"Error al enviar correo de recuperación a {email}: {str(e)}")
+            
+            # Respuesta uniforme anti-enumeraciones (OWASP A07)
+            request.session['reset_email'] = email
+            request.session['reset_attempts'] = 0
+            messages.success(request, 'Si el correo ingresado se encuentra registrado, recibirás un código de verificación de 6 dígitos.')
+            return redirect('password_reset_verify')
+    else:
+        form = PasswordResetRequestForm()
+    return render(request, 'usuarios/password_reset_request.html', {'form': form})
+
+def password_reset_verify_view(request):
+    email = request.session.get('reset_email')
+    if not email:
+        return redirect('password_reset_request')
+        
+    if request.method == 'POST':
+        form = PasswordResetVerifyForm(request.POST)
+        if form.is_valid():
+            try:
+                codigo = form.cleaned_data['codigo']
+                user = Usuario.objects.filter(email=email).first()
+                
+                # Obtener el último código activo registrado en base de datos para este usuario
+                reset_code = PasswordResetCode.objects.filter(usuario=user, usado=False).last() if user else None
+                
+                if not reset_code:
+                    request.session.pop('reset_email', None)
+                    messages.error(request, 'No hay un código activo. Por favor solicita uno nuevo.')
+                    return redirect('password_reset_request')
+
+                # Incrementar contador persistido en BD (Inmune a manipulación de cookies)
+                reset_code.intentos += 1
+                reset_code.save(update_fields=['intentos'])
+
+                if reset_code.intentos > 5:
+                    reset_code.usado = True
+                    reset_code.save(update_fields=['usado'])
+                    request.session.pop('reset_email', None)
+                    messages.error(request, 'Has superado el número máximo de 5 intentos fallidos para este código. Solicita uno nuevo por seguridad.')
+                    return redirect('password_reset_request')
+
+                if reset_code.codigo == codigo and reset_code.is_valid():
+                    reset_code.usado = True
+                    reset_code.save(update_fields=['usado'])
+                    request.session['reset_verified'] = True
+                    messages.success(request, 'Código verificado correctamente.')
+                    return redirect('password_reset_new_password')
+                else:
+                    messages.error(request, f'El código ingresado es incorrecto o expiró. (Intento {reset_code.intentos} de 5)')
+            except Exception as e:
+                logger.error(f"Error al verificar código de recuperación: {str(e)}")
+                messages.error(request, 'Ocurrió un error al procesar tu solicitud. Inténtalo nuevamente.')
+    else:
+        form = PasswordResetVerifyForm()
+    return render(request, 'usuarios/password_reset_verify.html', {'form': form})
+
+
+def password_reset_new_password_view(request):
+    email = request.session.get('reset_email')
+    verified = request.session.get('reset_verified')
+    
+    if not email or not verified:
+        return redirect('password_reset_request')
+        
+    if request.method == 'POST':
+        form = PasswordResetNewPasswordForm(request.POST)
+        if form.is_valid():
+            user = Usuario.objects.filter(email=email).first()
+            if user:
+                user.set_password(form.cleaned_data['password'])
+                user.save()
+                request.session.pop('reset_email', None)
+                request.session.pop('reset_verified', None)
+                request.session.pop('reset_attempts', None)
+                messages.success(request, 'Tu contraseña ha sido cambiada exitosamente. Ahora puedes iniciar sesión.')
+                return redirect('login')
+    else:
+        form = PasswordResetNewPasswordForm()
+        
+    return render(request, 'usuarios/password_reset_new_password.html', {'form': form})
+
+
+@login_required
+def inspectores_view(request):
+    from .forms import InspectorDocumentoForm, InspectorCarpetaForm
+    if not (request.user.is_superuser or (hasattr(request.user, 'rol') and request.user.rol and request.user.rol.ver_inspectores)):
+        messages.error(request, 'No tienes permiso para acceder a Inspectores.')
+        return redirect('dashboard')
+
+    if request.method == 'POST':
+        if not (request.user.is_superuser or (hasattr(request.user, 'rol') and request.user.rol and request.user.rol.editar_inspectores)):
+            messages.error(request, 'No tienes permiso para modificar documentos de inspectores.')
+            return redirect('inspectores')
+            
+        accion = request.POST.get('action')
+        if accion == 'crear_texto':
+            nombre = request.POST.get('nombre_texto')
+            descripcion = request.POST.get('descripcion_texto', '')
+            contenido = request.POST.get('contenido_texto', '')
+            tipo_texto = request.POST.get('tipo', 'General')
+            carpeta_id = request.POST.get('carpeta')
+            es_privado = request.POST.get('es_privado') == 'on'
+
+            if not nombre or not contenido:
+                messages.error(request, 'El título y el contenido son obligatorios.')
+                return redirect('inspectores')
+
+            from io import BytesIO
+            from reportlab.lib.pagesizes import letter
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+            from reportlab.lib.styles import getSampleStyleSheet
+            import re
+            from django.core.files.base import ContentFile
+            
+            buffer = BytesIO()
+            doc_pdf = SimpleDocTemplate(buffer, pagesize=letter)
+            styles = getSampleStyleSheet()
+            story = []
+            
+            story.append(Paragraph(nombre, styles['Title']))
+            story.append(Spacer(1, 12))
+            
+            for line in contenido.split('\n'):
+                if line.strip():
+                    clean_line = line.strip().replace('<', '&lt;').replace('>', '&gt;')
+                    story.append(Paragraph(clean_line, styles['Normal']))
+                else:
+                    story.append(Spacer(1, 12))
+                    
+            doc_pdf.build(story)
+            pdf_bytes = buffer.getvalue()
+            buffer.close()
+
+            safe_filename = re.sub(r'[^a-zA-Z0-9_\-]', '_', nombre) + '.pdf'
+
+            documento = Documento(
+                nombre=nombre,
+                descripcion=descripcion,
+                tipo=tipo_texto,
+                subido_por=request.user,
+                es_privado=es_privado,
+                es_de_inspector=True
+            )
+            
+            if carpeta_id:
+                try:
+                    documento.carpeta = Carpeta.objects.get(id=carpeta_id, es_de_inspector=True)
+                except Carpeta.DoesNotExist:
+                    pass
+                
+            documento.archivo.save(safe_filename, ContentFile(pdf_bytes), save=False)
+            documento.save()
+            
+            messages.success(request, f'Documento "{nombre}" redactado y guardado como PDF exitosamente.')
+            return redirect('inspectores')
+        elif accion == 'crear_carpeta':
+            carpeta_form = InspectorCarpetaForm(request.POST, user=request.user)
+            if carpeta_form.is_valid():
+                carpeta = carpeta_form.save(commit=False)
+                carpeta.creado_por = request.user
+                carpeta.es_de_inspector = True
+                carpeta.save()
+                carpeta_form.save_m2m()
+                messages.success(request, f'Carpeta "{carpeta.nombre}" creada exitosamente.')
+                return redirect('inspectores')
+            else:
+                messages.error(request, f'Error al crear la carpeta: {carpeta_form.errors.as_text()}')
+        else:
+            form = InspectorDocumentoForm(request.POST, request.FILES, user=request.user)
+            if form.is_valid():
+                documento = form.save(commit=False)
+                documento.subido_por = request.user
+                documento.es_de_inspector = True
+                documento.save()
+                form.save_m2m()
+                messages.success(request, f'Documento "{documento.nombre}" subido exitosamente.')
+                return redirect('inspectores')
+            else:
+                messages.error(request, f'Error al subir el documento: {form.errors.as_text()}')
+    else:
+        form = InspectorDocumentoForm(user=request.user)
+    
+    carpeta_form = InspectorCarpetaForm(user=request.user)
+    
+    query = request.GET.get('q')
+    tipo_archivo = request.GET.get('tipo_archivo')
+    tipo_documento = request.GET.get('tipo_documento')
+    usuario_id = request.GET.get('usuario')
+    ordenar_por = request.GET.get('ordenar_por', '-subido_en')
+    carpeta_id = request.GET.get('carpeta')
+
+    documentos = Documento.objects.select_related('subido_por', 'carpeta').filter(es_de_inspector=True)
+    carpetas = Carpeta.objects.select_related('creado_por').filter(es_de_inspector=True)
+
+    # Filtro de privacidad: (No es privado) OR (Soy el creador)
+    from django.db.models import Q
+    documentos = documentos.filter(
+        Q(es_privado=False) |
+        Q(subido_por=request.user)
+    ).distinct()
+    
+    carpetas = carpetas.filter(
+        Q(es_privado=False) |
+        Q(creado_por=request.user)
+    ).distinct()
+            
+    carpeta_actual = None
+    if carpeta_id:
+        try:
+            carpeta_actual = carpetas.get(id=carpeta_id)
+            documentos = documentos.filter(carpeta=carpeta_actual)
+            carpetas = Carpeta.objects.none()
+        except Carpeta.DoesNotExist:
+            documentos = documentos.filter(carpeta__isnull=True)
+    else:
+        documentos = documentos.filter(carpeta__isnull=True)
+
+    if query:
+        documentos = documentos.filter(
+            Q(nombre__icontains=query) |
+            Q(descripcion__icontains=query)
+        )
+
+    if tipo_archivo:
+        if tipo_archivo == 'pdf':
+            documentos = documentos.filter(archivo__iendswith='.pdf')
+        elif tipo_archivo == 'word':
+            documentos = documentos.filter(Q(archivo__iendswith='.doc') | Q(archivo__iendswith='.docx'))
+        elif tipo_archivo == 'excel':
+            documentos = documentos.filter(Q(archivo__iendswith='.xls') | Q(archivo__iendswith='.xlsx'))
+        elif tipo_archivo == 'imagen':
+            documentos = documentos.filter(Q(archivo__iendswith='.jpg') | Q(archivo__iendswith='.jpeg') | Q(archivo__iendswith='.png'))
+
+    if tipo_documento:
+        documentos = documentos.filter(tipo=tipo_documento)
+
+    if usuario_id:
+        documentos = documentos.filter(subido_por__id=usuario_id)
+
+    valid_sorts = ['-subido_en', 'subido_en', 'nombre', '-nombre']
+    if ordenar_por in valid_sorts:
+        documentos = documentos.order_by(ordenar_por)
+
+    usuarios_con_docs = Usuario.objects.filter(documento__es_de_inspector=True).distinct().order_by('nombre')
+
+    context = {
+        'form': form, 
+        'carpeta_form': carpeta_form,
+        'documentos': documentos, 
+        'carpetas': carpetas,
+        'carpeta_actual': carpeta_actual,
+        'usuarios_con_docs': usuarios_con_docs,
+        'tipos_documento': Documento.TIPO_DOCUMENTO_CHOICES
+    }
+    return render(request, 'usuarios/inspectores.html', context)
