@@ -1,4 +1,4 @@
-django
+Django==6.0.5
 reportlab
 pillow
 qrcode
