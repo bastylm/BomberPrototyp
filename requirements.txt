@@ -4,3 +4,4 @@ pillow
 qrcode
 mysqlclient
 openpyxl
+gunicorn
