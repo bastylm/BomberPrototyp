@@ -3,3 +3,4 @@ reportlab
 pillow
 qrcode
 mysqlclient
+openpyxl
