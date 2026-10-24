@@ -100,6 +100,11 @@ urlpatterns = [
     
     # Notificaciones
     path('api/notificaciones/', views.api_notificaciones, name='api_notificaciones'),
+    path('api/chatbot/', views.chatbot_api_view, name='chatbot_api'),
+    path('reportes/error/enviar/', views.enviar_reporte_error_view, name='enviar_reporte_error'),
+    path('reportes-errores/', views.reportes_errores_view, name='reportes_errores'),
+    path('reportes-errores/<int:reporte_id>/resolver/', views.resolver_reporte_error_view, name='resolver_reporte_error'),
+    path('reportes-errores/<int:reporte_id>/eliminar/', views.eliminar_reporte_error_view, name='eliminar_reporte_error'),
     path('notificaciones/leer/<int:notif_id>/', views.marcar_notificacion_leida, name='marcar_notificacion_leida'),
 
     # Avisos 

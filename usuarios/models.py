@@ -106,6 +106,15 @@ class Usuario(AbstractBaseUser, PermissionsMixin):
     def get_short_name(self):
         return self.nombre
 
+    @property
+    def es_inspector(self):
+        rol = self.rol
+        return bool(rol and (rol.nombre or '').strip().casefold() == 'inspector')
+
+    @property
+    def es_programador(self):
+        return (self.clave_radial or '').strip().casefold() == 'programador'
+
     def save(self, *args, **kwargs):
         if self.pk:
             try:
@@ -675,6 +684,113 @@ class AvisoDestinatario(models.Model):
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='avisos_asignados')
     leido = models.BooleanField(default=False)
     fecha_lectura = models.DateTimeField(null=True, blank=True)
+
+
+class ReporteError(models.Model):
+    ESTADO_PENDIENTE = 'pendiente'
+    ESTADO_CORREGIDO = 'corregido'
+    ESTADO_CHOICES = [
+        (ESTADO_PENDIENTE, 'En espera'),
+        (ESTADO_CORREGIDO, 'Corregido'),
+    ]
+
+    nombre = models.CharField(max_length=120, verbose_name='Nombre del error')
+    descripcion = models.TextField(max_length=5000, verbose_name='Descripción del error')
+    reportante_nombre = models.CharField(max_length=200, verbose_name='Nombre del reportante')
+    reportante_compania = models.CharField(max_length=80, blank=True, default='', verbose_name='Compañía del reportante')
+    reportante_rol = models.CharField(max_length=80, blank=True, default='', verbose_name='Rol del reportante')
+    creado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reportes_errores_creados',
+    )
+    fecha_creacion = models.DateTimeField(auto_now_add=True)
+    estado = models.CharField(max_length=20, choices=ESTADO_CHOICES, default=ESTADO_PENDIENTE, db_index=True)
+    corregido_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reportes_errores_corregidos',
+    )
+    fecha_resolucion = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-fecha_creacion']
+        verbose_name = 'Reporte de error'
+        verbose_name_plural = 'Reportes de errores'
+
+    def __str__(self):
+        return f'{self.nombre} ({self.get_estado_display()})'
+
+
+class GuiaChatbot(models.Model):
+    MODULO_CHOICES = [
+        ('dashboard', 'Inicio'),
+        ('inventario', 'Inventario'),
+        ('emergencias', 'Emergencias'),
+        ('salidas', 'Salidas a terreno'),
+        ('caja', 'Caja'),
+        ('documentos', 'Documentos'),
+        ('capacitaciones', 'Cursos y capacitaciones'),
+        ('malla', 'Malla curricular'),
+        ('mantenimiento', 'Mantenimiento'),
+        ('proyectos', 'Proyectos'),
+        ('resumen', 'Resumen General'),
+        ('inspectores', 'Inspectores'),
+        ('qr', 'Escanear QR'),
+        ('administracion', 'Administración'),
+    ]
+
+    titulo = models.CharField(max_length=160)
+    palabras_clave = models.TextField(
+        help_text='Separa las palabras o frases con coma o una línea nueva.'
+    )
+    pasos = models.TextField(help_text='Instrucciones breves, una por línea.')
+    modulo = models.CharField(max_length=24, choices=MODULO_CHOICES, default='dashboard')
+    prioridad = models.PositiveSmallIntegerField(default=0)
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['-prioridad', 'titulo']
+        verbose_name = 'Guía del chatbot'
+        verbose_name_plural = 'Guías del chatbot'
+
+    def __str__(self):
+        return self.titulo
+
+
+class ComandoChatbot(models.Model):
+    HANDLER_CHOICES = [
+        ('inventario_resumen', 'Resumen de inventario'),
+        ('emergencias_activas', 'Emergencias activas'),
+        ('caja_saldo', 'Saldo de caja'),
+    ]
+
+    MODULO_CHOICES = [
+        ('inventario', 'Inventario'),
+        ('emergencias', 'Emergencias'),
+        ('caja', 'Caja'),
+    ]
+
+    nombre = models.CharField(max_length=120, unique=True)
+    palabras_clave = models.TextField(
+        help_text='Separa las palabras o frases con coma o una línea nueva.'
+    )
+    handler = models.CharField(max_length=40, choices=HANDLER_CHOICES)
+    modulo_requerido = models.CharField(max_length=24, choices=MODULO_CHOICES)
+    prioridad = models.PositiveSmallIntegerField(default=0)
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['-prioridad', 'nombre']
+        verbose_name = 'Comando de consulta del chatbot'
+        verbose_name_plural = 'Comandos de consulta del chatbot'
+
+    def __str__(self):
+        return self.nombre
 
 class PasswordResetCode(models.Model):
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)

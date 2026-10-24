@@ -6,6 +6,7 @@ from django.core.paginator import Paginator
 from django.contrib import messages
 from django.contrib.auth import update_session_auth_hash
 from django.utils.html import escape
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.db import IntegrityError, transaction
 from django.db.models import Sum, Case, When, DecimalField, F, Q, Count, Prefetch
 from django.utils import timezone
@@ -17,6 +18,7 @@ import secrets
 from io import BytesIO
 from django.core.files.base import ContentFile
 from django.http import HttpResponse, JsonResponse
+from django.views.decorators.http import require_POST
 from django.core.mail import EmailMultiAlternatives, send_mail
 from django.conf import settings
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
@@ -26,14 +28,15 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 import openpyxl
 from reportlab.lib.units import inch
-from .forms import RegistroForm, LoginForm, ProyectoForm, ArchivoProyectoForm, DocumentoForm, CarpetaForm, SalidaTerrenoForm, EmergenciaForm, PerfilForm, PasswordChangeForm, CapacitacionForm, ReunionForm, MantenimientoForm, ArchivoMantenimientoForm, InventarioForm, CajaChicaForm, AdminUserCreationForm, AdminUserChangeForm, RolForm, CompaniaForm, InventarioEditForm, InventarioGroupEditForm, AvisoForm, PasswordResetRequestForm, PasswordResetVerifyForm, PasswordResetNewPasswordForm, VehiculoForm, VehiculoHojaVidaForm, VehiculoDocumentacionForm, RondaVehiculoForm
-from .models import Rol, Compania, Proyecto, ArchivoProyecto, Documento, Carpeta, SalidaTerreno, SalidaTerrenoUnidad, Emergencia, EmergenciaUnidad, Usuario, Capacitacion, CursoMalla, Mantenimiento, ArchivoMantenimiento, Inventario, CajaChica, Notificacion, Aviso, AvisoDestinatario, PasswordResetCode, RegistroPendiente, Vehiculo, RondaVehiculo
+from .forms import RegistroForm, LoginForm, ProyectoForm, ArchivoProyectoForm, DocumentoForm, CarpetaForm, SalidaTerrenoForm, EmergenciaForm, PerfilForm, PasswordChangeForm, CapacitacionForm, ReunionForm, MantenimientoForm, ArchivoMantenimientoForm, InventarioForm, CajaChicaForm, AdminUserCreationForm, AdminUserChangeForm, RolForm, CompaniaForm, InventarioEditForm, InventarioGroupEditForm, AvisoForm, ReporteErrorForm, PasswordResetRequestForm, PasswordResetVerifyForm, PasswordResetNewPasswordForm, VehiculoForm, VehiculoHojaVidaForm, VehiculoDocumentacionForm, RondaVehiculoForm
+from .models import Rol, Compania, Proyecto, ArchivoProyecto, Documento, Carpeta, SalidaTerreno, SalidaTerrenoUnidad, Emergencia, EmergenciaUnidad, Usuario, Capacitacion, CursoMalla, Mantenimiento, ArchivoMantenimiento, Inventario, CajaChica, Notificacion, Aviso, AvisoDestinatario, ReporteError, PasswordResetCode, RegistroPendiente, Vehiculo, RondaVehiculo
 from .decorators import admin_required, permiso_requerido, pertenencia_compania
 from .inventory_permissions import (
     puede_acceder_inventario_compania,
     puede_editar_inventario,
     puede_gestionar_inventario_global,
 )
+from .chatbot import responder as responder_chatbot
 import logging
 
 logger = logging.getLogger('usuarios')
@@ -49,7 +52,7 @@ def _enviar_codigo_registro(registro):
             <tr><td align="center">
                 <table width="500" cellpadding="0" cellspacing="0" style="background:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,0.08);">
                     <tr><td style="background:linear-gradient(135deg,#dc3545,#c82333); padding:30px 40px; text-align:center;">
-                        <img src="/static/usuarios/demo-logo.svg" alt="Logo Bomberos Demo" style="max-width:100px; border-radius:8px; margin-bottom:10px;">
+                        <img src="https://demo.sigbomberosmulchen.cl/static/usuarios/demo-logo.svg" alt="Logo Bomberos Demo" style="max-width:100px; border-radius:8px; margin-bottom:10px;">
                         <h2 style="color:#ffffff; margin:10px 0 0; font-size:20px; font-weight:600;">Compañía de Bomberos Demo</h2>
                     </td></tr>
                     <tr><td style="padding:40px;">
@@ -352,7 +355,7 @@ def dashboard_view(request):
     # Filtrar módulos basados en los permisos del usuario
     if request.user.is_superuser:
         filtered_modules = list(modules)
-        if not (hasattr(request.user, 'rol') and request.user.rol and request.user.rol.ver_inspectores):
+        if not request.user.es_inspector:
             filtered_modules = [m for m in filtered_modules if m['id'] != 'inspectores']
     else:
         filtered_modules = []
@@ -365,7 +368,7 @@ def dashboard_view(request):
                 continue
             
             if m['id'] == 'inspectores':
-                if rol and rol.ver_inspectores:
+                if request.user.es_inspector:
                     filtered_modules.append(m)
                 continue
             
@@ -381,6 +384,15 @@ def dashboard_view(request):
                 elif m['id'] == 'caja_chica' and rol.ver_caja_chica: filtered_modules.append(m)
                 elif m['id'] == 'scan_qr' and rol.ver_escanear_qr: filtered_modules.append(m)
                 elif m['id'] == 'proyectos' and rol.ver_proyectos: filtered_modules.append(m)
+
+    if request.user.es_programador:
+        filtered_modules.append({
+            'id': 'reportes_errores',
+            'url_name': 'reportes_errores',
+            'icon': 'bi-bug-fill',
+            'title': 'Seguimiento de errores',
+            'desc': 'Revisa y actualiza los reportes de errores del sistema.',
+        })
 
     # Obtener los avisos para el usuario actual
     avisos_usuario = AvisoDestinatario.objects.filter(
@@ -1109,7 +1121,7 @@ def documento_descargar_view(request, doc_id):
         
     # 2. Verificación si el documento es de inspectores
     if documento.es_de_inspector:
-        if not (request.user.is_superuser or (request.user.rol and request.user.rol.ver_inspectores)):
+        if not request.user.es_inspector:
             messages.error(request, 'No tienes permiso para ver documentos de inspectores.')
             return redirect('dashboard')
             
@@ -1134,6 +1146,9 @@ def documento_delete_view(request, doc_id):
     is_inspector = documento.es_de_inspector
     
     if is_inspector:
+        if not request.user.es_inspector:
+            messages.error(request, 'No tienes permiso para acceder a documentos de inspectores.')
+            return redirect('dashboard')
         if not (request.user.is_superuser or (hasattr(request.user, 'rol') and request.user.rol and request.user.rol.editar_inspectores)):
             messages.error(request, 'No tienes permiso para eliminar documentos de inspectores.')
             return redirect('inspectores')
@@ -1159,6 +1174,9 @@ def carpeta_delete_view(request, carpeta_id):
     is_inspector = carpeta.es_de_inspector
 
     if is_inspector:
+        if not request.user.es_inspector:
+            messages.error(request, 'No tienes permiso para acceder a carpetas de inspectores.')
+            return redirect('dashboard')
         if not (request.user.is_superuser or (hasattr(request.user, 'rol') and request.user.rol and request.user.rol.editar_inspectores)):
             messages.error(request, 'No tienes permiso para eliminar carpetas de inspectores.')
             return redirect('inspectores')
@@ -2191,7 +2209,7 @@ def enviar_email_capacitacion(capacitacion, usuarios, accion="invitado al"):
                     <table width="500" cellpadding="0" cellspacing="0" style="background:#ffffff; border-radius:12px; overflow:hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.08);">
                         <tr>
                             <td style="background: linear-gradient(135deg, #dc3545, #c82333); padding: 30px 40px; text-align: center;">
-                                <img src="/static/usuarios/demo-logo.svg" alt="Logo Bomberos Demo" style="max-width: 100px; border-radius: 8px; margin-bottom: 10px;">
+                                <img src="https://demo.sigbomberosmulchen.cl/static/usuarios/demo-logo.svg" alt="Logo Bomberos Demo" style="max-width: 100px; border-radius: 8px; margin-bottom: 10px;">
                                 <h2 style="color:#ffffff; margin: 10px 0 0 0; font-size: 20px; font-weight: 600;">Compañía de Bomberos Demo</h2>
                             </td>
                         </tr>
@@ -3051,7 +3069,7 @@ def aviso_create_view(request):
     <tr><td align="center">
       <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="width:100%;max-width:600px;background:#ffffff;border:1px solid #e2e6ea;border-radius:12px;overflow:hidden;">
         <tr><td style="background:#c9233a;padding:22px 30px;color:#ffffff;text-align:center;">
-          <img src="/static/usuarios/demo-logo.svg" alt="Logo de la Compañía de Bomberos Demo" width="68" height="68" style="display:block;width:68px;height:68px;object-fit:contain;margin:0 auto 14px;background:#ffffff;border-radius:50%;padding:5px;">
+          <img src="https://demo.sigbomberosmulchen.cl/static/usuarios/demo-logo.svg" alt="Logo de la Compañía de Bomberos Demo" width="68" height="68" style="display:block;width:68px;height:68px;object-fit:contain;margin:0 auto 14px;background:#ffffff;border-radius:50%;padding:5px;">
           <div style="font-size:12px;letter-spacing:1.2px;text-transform:uppercase;opacity:.9;">Compañía de Bomberos Demo</div>
           <div style="font-size:21px;font-weight:700;margin-top:6px;">Sistema de Gestión de Bomberos</div>
         </td></tr>
@@ -3193,6 +3211,165 @@ def perfil_view(request):
     return render(request, 'usuarios/perfil.html', context)
 
 @login_required
+def enviar_reporte_error_view(request):
+    if not request.user.is_superuser:
+        messages.error(request, 'No tienes permiso para enviar reportes de errores.')
+        return redirect('dashboard')
+    if request.method != 'POST':
+        return redirect('dashboard')
+
+    destino = request.POST.get('next', '')
+    if not url_has_allowed_host_and_scheme(
+        destino,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        destino = reverse('dashboard')
+
+    form = ReporteErrorForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, 'Completa el nombre y la descripción del error para enviar el reporte.')
+        return redirect(destino)
+
+    nombre = form.cleaned_data['nombre']
+    descripcion = form.cleaned_data['descripcion']
+    reportante = request.user.get_full_name().strip() or request.user.get_username()
+    compania_reportante = request.user.compania.nombre if request.user.compania else 'Sin compañía'
+    rol_reportante = request.user.rol.nombre if request.user.rol else ('Superusuario' if request.user.is_superuser else 'Sin rol')
+    reporte = ReporteError.objects.create(
+        nombre=nombre,
+        descripcion=descripcion,
+        reportante_nombre=reportante,
+        reportante_compania=compania_reportante,
+        reportante_rol=rol_reportante,
+        creado_por=request.user,
+    )
+
+    destinatarios = sorted({
+        usuario.email.strip()
+        for usuario in Usuario.objects.filter(is_active=True).only('email', 'clave_radial')
+        if usuario.clave_radial and usuario.clave_radial.strip().casefold() == 'programador'
+        and usuario.email and usuario.email.strip()
+    })
+    if not destinatarios:
+        messages.warning(
+            request,
+            f'Reporte #{reporte.id} guardado con estado “En espera”, pero no se encontraron desarrolladores con correo registrado.'
+        )
+        return redirect(destino)
+
+    url_seguimiento = request.build_absolute_uri(reverse('reportes_errores'))
+    cuerpo_texto = (
+        f"Se recibió el reporte de error #{reporte.id}.\n\n"
+        f"Nombre: {nombre}\n\n"
+        f"Descripción:\n{descripcion}\n\n"
+        f"Reportado por: {reportante}\n"
+        f"Compañía: {compania_reportante}\n"
+        f"Rol: {rol_reportante}\n\n"
+        f"Estado: En espera\n"
+        f"Seguimiento: {url_seguimiento}"
+    )
+    descripcion_html = escape(descripcion).replace('\r\n', '\n').replace('\n', '<br>')
+    cuerpo_html = f'''<!doctype html>
+    <html><body style="margin:0;background:#f4f5f7;font-family:Arial,sans-serif;color:#212529;padding:24px">
+      <table role="presentation" style="max-width:640px;width:100%;margin:auto;background:#fff;border-radius:12px;border:1px solid #e5e7eb;border-collapse:separate;border-spacing:0;overflow:hidden">
+        <tr><td style="background:#dc3545;color:#fff;padding:20px 24px;font-size:20px;font-weight:700">Reporte de error #{reporte.id}</td></tr>
+        <tr><td style="padding:24px">
+          <p style="margin:0 0 8px;color:#6c757d;font-size:13px">NOMBRE DEL ERROR</p>
+          <h1 style="font-size:21px;margin:0 0 22px">{escape(nombre)}</h1>
+          <p style="margin:0 0 8px;color:#6c757d;font-size:13px">DESCRIPCIÓN</p>
+          <div style="padding:16px;background:#f8f9fa;border-radius:8px;line-height:1.6">{descripcion_html}</div>
+          <p style="margin:22px 0 0;color:#6c757d;font-size:13px;line-height:1.7">
+            Reportado por: <strong>{escape(reportante)}</strong><br>
+            Compañía: <strong>{escape(compania_reportante)}</strong><br>
+            Rol: <strong>{escape(rol_reportante)}</strong>
+          </p>
+          <p style="margin:18px 0 0"><strong>Estado:</strong> En espera</p>
+          <p style="margin:16px 0 0"><a href="{escape(url_seguimiento)}" style="display:inline-block;background:#dc3545;color:#fff;text-decoration:none;padding:10px 16px;border-radius:6px">Ver seguimiento del reporte</a></p>
+        </td></tr>
+      </table>
+    </body></html>'''
+
+    enviados = 0
+    fallidos = 0
+    for destinatario in destinatarios:
+        try:
+            correo = EmailMultiAlternatives(
+                subject='Nuevo reporte de error del sistema',
+                body=cuerpo_texto,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                to=[destinatario],
+            )
+            correo.attach_alternative(cuerpo_html, 'text/html')
+            enviados += correo.send(fail_silently=False)
+        except Exception:
+            fallidos += 1
+            logger.exception('No se pudo enviar un reporte de error a un programador.')
+
+    if enviados and not fallidos:
+        messages.success(request, f'Reporte #{reporte.id} creado y enviado a {enviados} desarrollador(es). Estado: En espera.')
+    elif enviados:
+        messages.warning(request, f'Reporte #{reporte.id} enviado a {enviados} desarrollador(es), pero falló el envío a {fallidos}. Estado: En espera.')
+    else:
+        messages.error(request, f'Reporte #{reporte.id} quedó guardado con estado “En espera”, pero no se pudo enviar el correo.')
+    return redirect(destino)
+
+
+@login_required
+def reportes_errores_view(request):
+    if not (
+        request.user.es_programador
+        or request.user.is_superuser
+        or ReporteError.objects.filter(creado_por=request.user).exists()
+    ):
+        messages.error(request, 'No tienes permiso para consultar los reportes de errores.')
+        return redirect('dashboard')
+
+    reportes = ReporteError.objects.select_related('creado_por', 'corregido_por')
+    if not request.user.es_programador:
+        reportes = reportes.filter(creado_por=request.user)
+    return render(request, 'usuarios/reportes_errores.html', {
+        'reportes': reportes,
+        'puede_ver_todos': request.user.es_programador,
+    })
+
+
+@login_required
+def resolver_reporte_error_view(request, reporte_id):
+    if not request.user.es_programador:
+        messages.error(request, 'Solo los usuarios identificados como desarrolladores pueden corregir un reporte.')
+        return redirect('dashboard')
+    if request.method != 'POST':
+        return redirect('reportes_errores')
+
+    reporte = get_object_or_404(ReporteError, pk=reporte_id)
+    if reporte.estado == ReporteError.ESTADO_PENDIENTE:
+        reporte.estado = ReporteError.ESTADO_CORREGIDO
+        reporte.corregido_por = request.user
+        reporte.fecha_resolucion = timezone.now()
+        reporte.save(update_fields=['estado', 'corregido_por', 'fecha_resolucion'])
+        messages.success(request, f'El reporte #{reporte.id} quedó marcado como corregido.')
+    else:
+        messages.info(request, f'El reporte #{reporte.id} ya estaba corregido.')
+    return redirect('reportes_errores')
+
+
+@login_required
+def eliminar_reporte_error_view(request, reporte_id):
+    if not request.user.es_programador:
+        messages.error(request, 'Solo los usuarios identificados como desarrolladores pueden eliminar reportes.')
+        return redirect('dashboard')
+    if request.method != 'POST':
+        return redirect('reportes_errores')
+
+    reporte = get_object_or_404(ReporteError, pk=reporte_id)
+    reporte_id = reporte.id
+    reporte.delete()
+    messages.success(request, f'El reporte #{reporte_id} fue eliminado.')
+    return redirect('reportes_errores')
+
+
+@login_required
 def api_notificaciones(request):
     # Filtramos para mostrar y enviar al frontend SOLO las notificaciones no leídas
     notifs = request.user.notificaciones_recibidas.filter(leida=False)[:10]
@@ -3205,6 +3382,24 @@ def api_notificaciones(request):
     } for n in notifs]
     no_leidas = request.user.notificaciones_recibidas.filter(leida=False).count()
     return JsonResponse({'notificaciones': data, 'no_leidas': no_leidas})
+
+
+@require_POST
+def chatbot_api_view(request):
+    if not request.user.is_authenticated:
+        return JsonResponse({'text': 'Inicia sesión para usar el asistente.'}, status=401)
+
+    mensaje = (request.POST.get('message') or '').strip()
+    if not mensaje:
+        return JsonResponse({'text': 'Escribe una pregunta para poder ayudarte.'}, status=400)
+    if len(mensaje) > 500:
+        return JsonResponse({'text': 'La pregunta es demasiado larga. Usa hasta 500 caracteres.'}, status=400)
+
+    respuesta = responder_chatbot(request.user, mensaje)
+    accion = None
+    if respuesta.get('url'):
+        accion = {'url': respuesta['url'], 'label': respuesta.get('label') or 'Abrir módulo'}
+    return JsonResponse({'text': respuesta['text'], 'action': accion})
 
 @login_required
 def aviso_delete_view(request, aviso_id):
@@ -3245,7 +3440,7 @@ def password_reset_request_view(request):
                                     <table width="500" cellpadding="0" cellspacing="0" style="background:#ffffff; border-radius:12px; overflow:hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.08);">
                                         <tr>
                                             <td style="background: linear-gradient(135deg, #dc3545, #c82333); padding: 30px 40px; text-align: center;">
-                                                <img src="/static/usuarios/demo-logo.svg" alt="Logo Bomberos Demo" style="max-width: 100px; border-radius: 8px; margin-bottom: 10px;">
+                                                <img src="https://demo.sigbomberosmulchen.cl/static/usuarios/demo-logo.svg" alt="Logo Bomberos Demo" style="max-width: 100px; border-radius: 8px; margin-bottom: 10px;">
                                                 <h2 style="color:#ffffff; margin: 10px 0 0 0; font-size: 20px; font-weight: 600;">Compañía de Bomberos Demo</h2>
                                             </td>
                                         </tr>
@@ -3380,7 +3575,7 @@ def password_reset_new_password_view(request):
 @login_required
 def inspectores_view(request):
     from .forms import InspectorDocumentoForm, InspectorCarpetaForm
-    if not (request.user.is_superuser or (hasattr(request.user, 'rol') and request.user.rol and request.user.rol.ver_inspectores)):
+    if not request.user.es_inspector:
         messages.error(request, 'No tienes permiso para acceder a Inspectores.')
         return redirect('dashboard')
 

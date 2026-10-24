@@ -468,7 +468,9 @@ class SalidaTerrenoForm(forms.ModelForm):
         user = kwargs.pop('user', None)
         super().__init__(*args, **kwargs)
         unidades = Vehiculo.objects.select_related('compania').order_by('compania__nombre', 'nombre')
-        if user and not user.is_superuser and user.compania_id:
+        rol_nombre = getattr(getattr(user, 'rol', None), 'nombre', '') if user else ''
+        rol_es_admin = rol_nombre.strip().casefold() in {'admin', 'administrador'}
+        if user and not user.is_superuser and not rol_es_admin and user.compania_id:
             unidades = unidades.filter(compania_id=user.compania_id)
         self.fields['unidades'].queryset = unidades
         self.fields['unidades'].label_from_instance = lambda unidad: unidad.nombre
@@ -1121,6 +1123,27 @@ class InventarioGroupEditForm(forms.Form):
             else:
                 raise forms.ValidationError("Ingrese un valor numérico válido.")
         return None
+
+class ReporteErrorForm(forms.Form):
+    nombre = forms.CharField(
+        label="Nombre del error",
+        max_length=120,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Ej.: No carga el inventario',
+            'autocomplete': 'off',
+        }),
+    )
+    descripcion = forms.CharField(
+        label="Descripción del error",
+        max_length=5000,
+        widget=forms.Textarea(attrs={
+            'class': 'form-control',
+            'rows': 5,
+            'placeholder': 'Describe qué ocurrió y qué pasos permiten reproducirlo.',
+        }),
+    )
+
 
 class AvisoForm(forms.ModelForm):
     usuarios = forms.ModelMultipleChoiceField(
