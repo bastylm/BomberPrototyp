@@ -141,15 +141,16 @@ MEDIA_ROOT = Path(os.environ.get('MEDIA_ROOT', BASE_DIR / 'media'))
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# Keep demo email local unless a separate demo mailbox is configured.
-EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
-EMAIL_HOST = os.environ.get('EMAIL_HOST', 'localhost')
+# Configuración de correo SMTP para notificaciones.
+EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
 EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 587))
 EMAIL_USE_SSL = env_bool('EMAIL_USE_SSL', False)
 EMAIL_USE_TLS = env_bool('EMAIL_USE_TLS', True)
-EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
+# Keep the Gmail app password outside the repository in the .env/environment.
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', 'contactobomberosmulchen@gmail.com')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
-DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'Demo <noreply@example.invalid>')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'Sistema Bomberos <contactobomberosmulchen@gmail.com>')
 
 # --- CABECERAS Y MEDIDAS DE SEGURIDAD OWASP ---
 SECURE_BROWSER_XSS_FILTER = True
