@@ -197,7 +197,10 @@ def registro_verificar_view(request):
                         registro.foto_perfil.delete(save=False)
                     registro.delete()
                     request.session.pop('registro_pendiente_email', None)
-                    messages.success(request, 'Correo verificado. Si la solicitud procede, quedará pendiente de aprobación administrativa.')
+                    messages.info(
+                        request,
+                        'Correo verificado, pero no se creó una nueva solicitud. Si ya tienes una cuenta, inicia sesión o usa Recuperar Contraseña; si necesitas actualizar tus datos, contacta a un administrador.'
+                    )
                     return redirect('login')
                 try:
                     with transaction.atomic():
@@ -246,7 +249,10 @@ def registro_verificar_view(request):
                         if registro_error.foto_perfil:
                             registro_error.foto_perfil.delete(save=False)
                         registro_error.delete()
-                    messages.success(request, 'Correo verificado. Si la solicitud procede, quedará pendiente de aprobación administrativa.')
+                    messages.info(
+                        request,
+                        'Correo verificado, pero no se pudo crear una nueva solicitud. Si ya tienes una cuenta, inicia sesión o usa Recuperar Contraseña; si necesitas ayuda, contacta a un administrador.'
+                    )
                     request.session.pop('registro_pendiente_email', None)
                     return redirect('login')
                 else:

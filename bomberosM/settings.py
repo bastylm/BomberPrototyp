@@ -162,6 +162,11 @@ CSRF_COOKIE_HTTPONLY = True
 SECURE_REFERRER_POLICY = 'same-origin'
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+# Keep the demo's browser cookies separate from the main site on the parent domain.
+SESSION_COOKIE_NAME = 'bomberprototyp_demo_sessionid'
+CSRF_COOKIE_NAME = 'bomberprototyp_demo_csrftoken'
+SESSION_COOKIE_DOMAIN = None
+CSRF_COOKIE_DOMAIN = None
 SESSION_COOKIE_SECURE = env_bool('SESSION_COOKIE_SECURE', not DEBUG)
 CSRF_COOKIE_SECURE = env_bool('CSRF_COOKIE_SECURE', not DEBUG)
 
