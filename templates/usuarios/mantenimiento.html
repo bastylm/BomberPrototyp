@@ -203,6 +203,34 @@
             </div>
         </div>
     </div>
+    {% if page_obj.paginator.num_pages > 1 %}
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
+        <small class="text-muted">Página {{ page_obj.number }} de {{ page_obj.paginator.num_pages }} · {{ page_obj.paginator.count }} mantenimientos</small>
+        <nav aria-label="Paginación de mantenimientos">
+            <ul class="pagination pagination-sm mb-0">
+                {% if page_obj.has_previous %}
+                <li class="page-item"><a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page=1" aria-label="Primera página">«</a></li>
+                <li class="page-item"><a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page={{ page_obj.previous_page_number }}" aria-label="Página anterior">‹</a></li>
+                {% else %}
+                <li class="page-item disabled"><span class="page-link">«</span></li>
+                <li class="page-item disabled"><span class="page-link">‹</span></li>
+                {% endif %}
+                {% for page_number in page_obj.paginator.page_range %}
+                <li class="page-item {% if page_number == page_obj.number %}active{% endif %}">
+                    <a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page={{ page_number }}">{{ page_number }}</a>
+                </li>
+                {% endfor %}
+                {% if page_obj.has_next %}
+                <li class="page-item"><a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page={{ page_obj.next_page_number }}" aria-label="Página siguiente">›</a></li>
+                <li class="page-item"><a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page={{ page_obj.paginator.num_pages }}" aria-label="Última página">»</a></li>
+                {% else %}
+                <li class="page-item disabled"><span class="page-link">›</span></li>
+                <li class="page-item disabled"><span class="page-link">»</span></li>
+                {% endif %}
+            </ul>
+        </nav>
+    </div>
+    {% endif %}
 </main>
 
 <!-- Modal Crear Mantenimiento -->

@@ -2658,6 +2658,11 @@ def mantenimiento_view(request):
     if ordenar_por in valid_sorts:
         mantenimientos = mantenimientos.order_by(ordenar_por)
 
+    paginator = Paginator(mantenimientos, 25)
+    mantenimientos = paginator.get_page(request.GET.get('page'))
+    query_params = request.GET.copy()
+    query_params.pop('page', None)
+
     usuarios_con_mantenimientos = Usuario.objects.filter(compania__isnull=False, mantenimientos_responsable__isnull=False).distinct().order_by('nombre')
 
     rol = getattr(request.user, 'rol', None)
@@ -2670,6 +2675,9 @@ def mantenimiento_view(request):
         'form': form,
         'archivo_form': archivo_form,
         'mantenimientos': mantenimientos,
+        'page_obj': mantenimientos,
+        'paginator': paginator,
+        'pagination_query': query_params.urlencode(),
         'usuarios_con_mantenimientos': usuarios_con_mantenimientos,
         'puede_registrar_ronda': puede_registrar_ronda,
         'vehiculos_para_ronda': vehiculos_para_ronda,
