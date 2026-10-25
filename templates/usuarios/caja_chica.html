@@ -4,6 +4,14 @@
 {% block title %}Caja - {{ block.super }}{% endblock %}
 
 {% block content %}
+<style>
+    .cash-pagination .page-link { color: #dc3545; }
+    .cash-pagination .page-link:hover,
+    .cash-pagination .page-link:focus { color: #b02a37; background-color: #f8d7da; border-color: #f1aeb5; }
+    .cash-pagination .page-item.active .page-link { color: #fff; background-color: #dc3545; border-color: #dc3545; }
+    .cash-pagination .page-item.disabled .page-link { color: #adb5bd; }
+    #cashPaginationContainer[hidden] { display: none !important; }
+</style>
 <!-- Header del contenido principal -->
 <header class="d-flex align-items-center justify-content-between pb-3 mb-4 border-bottom">
     <h1 class="h2 mb-0">Control de Caja</h1>
@@ -127,7 +135,7 @@
                     <tbody id="cajaTableBody">
                         <tr id="no-caja-found" style="display: none;"><td colspan="{% if request.user.is_superuser %}9{% else %}8{% endif %}" class="text-center text-muted py-4">No se encontraron movimientos con los filtros aplicados.</td></tr>
                         {% for mov in movimientos %}
-                        <tr>
+                        <tr class="caja-mov-row">
                             <td>{{ mov.fecha|date:"d/m/Y H:i" }}</td>
                             <td>
                                 {% if mov.tipo == 'Ingreso' %}
@@ -186,6 +194,10 @@
                 </table>
             </div>
         </div>
+    </div>
+    <div id="cashPaginationContainer" class="d-flex justify-content-between align-items-center flex-wrap gap-2 mt-3" hidden>
+        <small id="cashPaginationInfo" class="text-muted" aria-live="polite"></small>
+        <nav class="cash-pagination" aria-label="Paginación de movimientos de caja"><ul id="cashPagination" class="pagination pagination-sm mb-0"></ul></nav>
     </div>
 </main>
 
@@ -382,33 +394,84 @@ document.addEventListener('DOMContentLoaded', function () {
     const cajaTypeFilter = document.getElementById('cajaTypeFilter');
     const cajaTableBody = document.getElementById('cajaTableBody');
     const noCajaRow = document.getElementById('no-caja-found');
+    const cashPageSize = 10;
+    let cashCurrentPage = 1;
 
-    function filterCaja() {
+    function renderCashPagination(totalItems) {
+        const container = document.getElementById('cashPaginationContainer');
+        const info = document.getElementById('cashPaginationInfo');
+        const list = document.getElementById('cashPagination');
+        const totalPages = Math.ceil(totalItems / cashPageSize);
+        container.hidden = totalPages <= 1;
+        list.replaceChildren();
+        if (totalPages <= 1) {
+            info.textContent = '';
+            return;
+        }
+        const first = (cashCurrentPage - 1) * cashPageSize + 1;
+        info.textContent = `Mostrando ${first}–${Math.min(first + cashPageSize - 1, totalItems)} de ${totalItems} movimientos`;
+        const addButton = (label, page, disabled = false, active = false) => {
+            const item = document.createElement('li');
+            item.className = `page-item${disabled ? ' disabled' : ''}${active ? ' active' : ''}`;
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'page-link';
+            button.textContent = label;
+            button.disabled = disabled;
+            if (active) button.setAttribute('aria-current', 'page');
+            button.addEventListener('click', () => {
+                cashCurrentPage = page;
+                filterCaja();
+            });
+            item.appendChild(button);
+            list.appendChild(item);
+        };
+        addButton('‹', cashCurrentPage - 1, cashCurrentPage === 1);
+        const visiblePages = new Set([1, totalPages]);
+        for (let page = Math.max(1, cashCurrentPage - 2); page <= Math.min(totalPages, cashCurrentPage + 2); page++) visiblePages.add(page);
+        let previousPage = 0;
+        [...visiblePages].sort((a, b) => a - b).forEach(page => {
+            if (previousPage && page - previousPage > 1) {
+                const gap = document.createElement('li');
+                gap.className = 'page-item disabled';
+                gap.innerHTML = '<span class="page-link">…</span>';
+                list.appendChild(gap);
+            }
+            addButton(String(page), page, false, page === cashCurrentPage);
+            previousPage = page;
+        });
+        addButton('›', cashCurrentPage + 1, cashCurrentPage === totalPages);
+    }
+
+    function filterCaja(resetPage = false) {
+        if (resetPage) cashCurrentPage = 1;
         if (!cajaTableBody) return;
         const searchText = cajaSearchInput.value.toLowerCase();
         const selectedType = cajaTypeFilter.value.toLowerCase();
 
-        const rows = cajaTableBody.querySelectorAll('tr:not(#no-caja-found)');
-        let visibleRows = 0;
-
+        const rows = Array.from(cajaTableBody.querySelectorAll('tr.caja-mov-row'));
+        const matchingRows = [];
         rows.forEach(row => {
-            if (row.children.length === 1 && row.textContent.includes('No hay movimientos registrados')) return;
-
             const textContent = row.textContent.toLowerCase();
             const typeCell = row.cells[1] ? row.cells[1].textContent.trim().toLowerCase() : "";
 
             const matchesSearch = searchText === "" || textContent.includes(searchText);
             const matchesType = selectedType === "" || typeCell === selectedType;
 
-            if (matchesSearch && matchesType) { row.style.display = ""; visibleRows++; } 
-            else { row.style.display = "none"; }
+            if (matchesSearch && matchesType) matchingRows.push(row);
         });
+        const totalPages = Math.max(1, Math.ceil(matchingRows.length / cashPageSize));
+        cashCurrentPage = Math.min(cashCurrentPage, totalPages);
+        const visibleRows = new Set(matchingRows.slice((cashCurrentPage - 1) * cashPageSize, cashCurrentPage * cashPageSize));
+        rows.forEach(row => { row.style.display = visibleRows.has(row) ? '' : 'none'; });
 
-        if (noCajaRow) noCajaRow.style.display = visibleRows === 0 && rows.length > 0 ? "" : "none";
+        if (noCajaRow) noCajaRow.style.display = matchingRows.length === 0 && rows.length > 0 ? '' : 'none';
+        renderCashPagination(matchingRows.length);
     }
 
-    if (cajaSearchInput) cajaSearchInput.addEventListener('keyup', filterCaja);
-    if (cajaTypeFilter) cajaTypeFilter.addEventListener('change', filterCaja);
+    if (cajaSearchInput) cajaSearchInput.addEventListener('input', () => filterCaja(true));
+    if (cajaTypeFilter) cajaTypeFilter.addEventListener('change', () => filterCaja(true));
+    filterCaja();
 });
 </script>
 {% endblock %}
