@@ -3,6 +3,14 @@
 {% block title %}Proyectos - {{ block.super }}{% endblock %}
 
 {% block content %}
+<style>
+    .project-pagination .page-link { color: #dc3545; }
+    .project-pagination .page-link:hover,
+    .project-pagination .page-link:focus { color: #b02a37; background-color: #f8d7da; border-color: #f1aeb5; }
+    .project-pagination .page-item.active .page-link { color: #fff; background-color: #dc3545; border-color: #dc3545; }
+    .project-pagination .page-item.disabled .page-link { color: #adb5bd; }
+    #projectPaginationContainer[hidden] { display: none !important; }
+</style>
 <!-- Header del contenido principal -->
 <header class="d-flex flex-column flex-sm-row align-items-sm-center justify-content-between gap-3 pb-3 mb-4 border-bottom">
     <h1 class="h2 mb-0">Proyectos</h1>
@@ -85,6 +93,10 @@
                 {% include 'usuarios/proyecto_card.html' with status="Planificado" status_class="secondary" %}
             {% endif %}
         {% endfor %}
+    </div>
+    <div id="projectPaginationContainer" class="d-flex justify-content-between align-items-center flex-wrap gap-2 mt-3" hidden>
+        <small id="projectPaginationInfo" class="text-muted" aria-live="polite"></small>
+        <nav class="project-pagination" aria-label="Paginación de proyectos"><ul id="projectPagination" class="pagination pagination-sm mb-0"></ul></nav>
     </div>
 </main>
 
@@ -403,14 +415,63 @@ document.addEventListener('DOMContentLoaded', function () {
     const statusFilter = document.getElementById('statusFilter');
     const proyectosList = document.getElementById('proyectos-list');
     const noResultsRow = document.getElementById('no-proyectos-found');
+    const projectPageSize = 10;
+    let projectCurrentPage = 1;
 
-    function filterProjects() {
+    function renderProjectPagination(totalItems) {
+        const container = document.getElementById('projectPaginationContainer');
+        const info = document.getElementById('projectPaginationInfo');
+        const list = document.getElementById('projectPagination');
+        const totalPages = Math.ceil(totalItems / projectPageSize);
+        container.hidden = totalPages <= 1;
+        list.replaceChildren();
+        if (totalPages <= 1) {
+            info.textContent = '';
+            return;
+        }
+        const first = (projectCurrentPage - 1) * projectPageSize + 1;
+        info.textContent = `Mostrando ${first}–${Math.min(first + projectPageSize - 1, totalItems)} de ${totalItems} proyectos`;
+        const addButton = (label, page, disabled = false, active = false) => {
+            const item = document.createElement('li');
+            item.className = `page-item${disabled ? ' disabled' : ''}${active ? ' active' : ''}`;
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'page-link';
+            button.textContent = label;
+            button.disabled = disabled;
+            if (active) button.setAttribute('aria-current', 'page');
+            button.addEventListener('click', () => {
+                projectCurrentPage = page;
+                filterProjects();
+            });
+            item.appendChild(button);
+            list.appendChild(item);
+        };
+        addButton('‹', projectCurrentPage - 1, projectCurrentPage === 1);
+        const visiblePages = new Set([1, totalPages]);
+        for (let page = Math.max(1, projectCurrentPage - 2); page <= Math.min(totalPages, projectCurrentPage + 2); page++) visiblePages.add(page);
+        let previousPage = 0;
+        [...visiblePages].sort((a, b) => a - b).forEach(page => {
+            if (previousPage && page - previousPage > 1) {
+                const gap = document.createElement('li');
+                gap.className = 'page-item disabled';
+                gap.innerHTML = '<span class="page-link">…</span>';
+                list.appendChild(gap);
+            }
+            addButton(String(page), page, false, page === projectCurrentPage);
+            previousPage = page;
+        });
+        addButton('›', projectCurrentPage + 1, projectCurrentPage === totalPages);
+    }
+
+    function filterProjects(resetPage = false) {
+        if (resetPage) projectCurrentPage = 1;
         if (!proyectosList) return;
         const searchText = searchInput.value.toLowerCase();
         const selectedType = typeFilter.value.toLowerCase();
         const selectedStatus = statusFilter.value.toLowerCase();
         const cards = proyectosList.getElementsByClassName('project-card');
-        let visibleCards = 0;
+        const matchingCards = [];
 
         for (let i = 0; i < cards.length; i++) {
             const card = cards[i];
@@ -433,21 +494,24 @@ document.addEventListener('DOMContentLoaded', function () {
             const matchesStatus = selectedStatus === "" || status === selectedStatus;
 
             if (matchesSearch && matchesType && matchesStatus) {
-                card.style.display = "";
-                visibleCards++;
-            } else {
-                card.style.display = "none";
+                matchingCards.push(card);
             }
         }
+        const totalPages = Math.max(1, Math.ceil(matchingCards.length / projectPageSize));
+        projectCurrentPage = Math.min(projectCurrentPage, totalPages);
+        const visibleCards = new Set(matchingCards.slice((projectCurrentPage - 1) * projectPageSize, projectCurrentPage * projectPageSize));
+        for (let i = 0; i < cards.length; i++) cards[i].style.display = visibleCards.has(cards[i]) ? '' : 'none';
 
         if (noResultsRow) {
-            noResultsRow.style.display = visibleCards === 0 ? "block" : "none";
+            noResultsRow.style.display = matchingCards.length === 0 ? "block" : "none";
         }
+        renderProjectPagination(matchingCards.length);
     }
 
-    if (searchInput) searchInput.addEventListener('keyup', filterProjects);
-    if (typeFilter) typeFilter.addEventListener('change', filterProjects);
-    if (statusFilter) statusFilter.addEventListener('change', filterProjects);
+    if (searchInput) searchInput.addEventListener('input', () => filterProjects(true));
+    if (typeFilter) typeFilter.addEventListener('change', () => filterProjects(true));
+    if (statusFilter) statusFilter.addEventListener('change', () => filterProjects(true));
+    filterProjects();
 
     // --- Lógica AJAX para Crear Proyecto ---
     const createForm = document.getElementById('createProjectForm');
