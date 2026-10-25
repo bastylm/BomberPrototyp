@@ -1,4 +1,4 @@
-<div class="erpbot" data-endpoint="{% url 'chatbot_api' %}">
+<div class="erpbot{% if request.resolver_match.url_name == 'mantenimiento' %} erpbot-maintenance{% endif %}" data-endpoint="{% url 'chatbot_api' %}">
     <button class="erpbot-toggle" type="button" aria-label="Abrir asistente" aria-expanded="false" aria-controls="erpbot-panel">
         <i class="bi bi-chat-dots-fill" aria-hidden="true"></i>
     </button>
@@ -21,6 +21,7 @@
 
 <style>
     .erpbot { position: fixed; right: 1.25rem; bottom: 1.25rem; z-index: 1040; font-family: inherit; }
+    .erpbot.erpbot-maintenance { bottom: 5.25rem; }
     .erpbot-toggle { width: 3.5rem; height: 3.5rem; border: 0; border-radius: 50%; color: #fff; background: #dc3545; box-shadow: 0 4px 16px #0003; font-size: 1.35rem; }
     .erpbot-toggle:hover { background: #bb2d3b; }
     .erpbot-panel { position: absolute; right: 0; bottom: 4.25rem; display: flex; flex-direction: column; width: min(24rem, calc(100vw - 2rem)); height: min(34rem, calc(100vh - 7rem)); overflow: hidden; background: var(--bs-body-bg, #fff); color: var(--bs-body-color, #212529); border: 1px solid var(--bs-border-color, #dee2e6); border-radius: 1rem; box-shadow: 0 10px 34px #0003; }
@@ -37,7 +38,7 @@
     .erpbot-form input { min-width: 0; flex: 1; padding: .6rem .75rem; border: 1px solid var(--bs-border-color, #ced4da); border-radius: .6rem; background: var(--bs-body-bg, #fff); color: var(--bs-body-color, #212529); }
     .erpbot-form button { width: 2.6rem; border: 0; border-radius: .6rem; color: #fff; background: #dc3545; }
     .erpbot-form button:disabled { opacity: .6; }
-    @media (max-width: 480px) { .erpbot { right: .75rem; bottom: .75rem; } .erpbot-panel { right: -.15rem; bottom: 4rem; width: calc(100vw - 1.5rem); height: min(32rem, calc(100dvh - 5.5rem)); } }
+    @media (max-width: 480px) { .erpbot { right: .75rem; bottom: .75rem; } .erpbot.erpbot-maintenance { bottom: 5.25rem; } .erpbot-panel { right: -.15rem; bottom: 4rem; width: calc(100vw - 1.5rem); height: min(32rem, calc(100dvh - 5.5rem)); } }
 </style>
 
 <script>

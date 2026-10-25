@@ -4,6 +4,13 @@
 {% block title %}Mantenimiento Vehicular - {{ block.super }}{% endblock %}
 
 {% block content %}
+<style>
+    .maintenance-pagination .page-link { color: #dc3545; }
+    .maintenance-pagination .page-link:hover,
+    .maintenance-pagination .page-link:focus { color: #b02a37; background-color: #f8d7da; border-color: #f1aeb5; }
+    .maintenance-pagination .page-item.active .page-link { color: #fff; background-color: #dc3545; border-color: #dc3545; }
+    .maintenance-pagination .page-item.disabled .page-link { color: #adb5bd; }
+</style>
 <!-- Header del contenido principal -->
 <header class="d-flex flex-column flex-sm-row align-items-sm-center justify-content-between gap-3 pb-3 mb-4 border-bottom">
     <div class="flex-grow-1">
@@ -206,7 +213,7 @@
     {% if page_obj.paginator.num_pages > 1 %}
     <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
         <small class="text-muted">Página {{ page_obj.number }} de {{ page_obj.paginator.num_pages }} · {{ page_obj.paginator.count }} mantenimientos</small>
-        <nav aria-label="Paginación de mantenimientos">
+        <nav class="maintenance-pagination" aria-label="Paginación de mantenimientos">
             <ul class="pagination pagination-sm mb-0">
                 {% if page_obj.has_previous %}
                 <li class="page-item"><a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page=1" aria-label="Primera página">«</a></li>
