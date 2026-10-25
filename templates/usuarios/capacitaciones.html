@@ -3,6 +3,14 @@
 {% block title %}Cursos y Capacitaciones - {{ block.super }}{% endblock %}
 
 {% block content %}
+<style>
+    .training-pagination .page-link { color: #dc3545; }
+    .training-pagination .page-link:hover,
+    .training-pagination .page-link:focus { color: #b02a37; background-color: #f8d7da; border-color: #f1aeb5; }
+    .training-pagination .page-item.active .page-link { color: #fff; background-color: #dc3545; border-color: #dc3545; }
+    .training-pagination .page-item.disabled .page-link { color: #adb5bd; }
+    #coursesPaginationContainer[hidden], #activitiesPaginationContainer[hidden] { display: none !important; }
+</style>
 <!-- Header del contenido principal -->
 <header class="d-flex flex-column flex-sm-row align-items-sm-center justify-content-between gap-3 pb-3 mb-4 border-bottom">
     <h1 class="h2 mb-0">Gestión de Cursos y Capacitaciones</h1>
@@ -188,6 +196,10 @@
                 {% empty %}
                 <div class="col-12 text-center text-muted py-5">No hay cursos oficiales registrados.</div>
                 {% endfor %}
+            </div>
+            <div id="coursesPaginationContainer" class="d-flex justify-content-between align-items-center flex-wrap gap-2 mt-3" hidden>
+                <small id="coursesPaginationInfo" class="text-muted" aria-live="polite"></small>
+                <nav class="training-pagination" aria-label="Paginación de cursos"><ul id="coursesPagination" class="pagination pagination-sm mb-0"></ul></nav>
             </div>
         </div> <!-- Cierre tab-pane cursos -->
 
@@ -466,6 +478,10 @@
                     </div>
                 </div>
                 {% endfor %}
+            </div>
+            <div id="activitiesPaginationContainer" class="d-flex justify-content-between align-items-center flex-wrap gap-2 mt-3" hidden>
+                <small id="activitiesPaginationInfo" class="text-muted" aria-live="polite"></small>
+                <nav class="training-pagination" aria-label="Paginación de capacitaciones"><ul id="activitiesPagination" class="pagination pagination-sm mb-0"></ul></nav>
             </div>
             {% if not actividades_internas and not reuniones %}
             <div id="empty-activities-state" class="text-center text-muted py-5">
@@ -1142,15 +1158,62 @@ document.addEventListener('DOMContentLoaded', function () {
     const activityFilterButton = document.getElementById('activityFilterButton');
     const noActivitiesFound = document.getElementById('no-activities-found');
     const emptyActivitiesState = document.getElementById('empty-activities-state');
+    const cardPageSize = 10;
 
-    function filterActivities() {
+    function renderCardPagination(containerId, infoId, paginationId, totalItems, currentPage, onPageChange) {
+        const container = document.getElementById(containerId);
+        const info = document.getElementById(infoId);
+        const list = document.getElementById(paginationId);
+        if (!container || !info || !list) return;
+        const totalPages = Math.ceil(totalItems / cardPageSize);
+        container.hidden = totalPages <= 1;
+        list.replaceChildren();
+        if (totalPages <= 1) {
+            info.textContent = totalItems ? `Mostrando ${totalItems} de ${totalItems}` : '';
+            return;
+        }
+        const first = (currentPage - 1) * cardPageSize + 1;
+        info.textContent = `Mostrando ${first}–${Math.min(first + cardPageSize - 1, totalItems)} de ${totalItems}`;
+        const addButton = (label, page, disabled = false, active = false) => {
+            const item = document.createElement('li');
+            item.className = `page-item${disabled ? ' disabled' : ''}${active ? ' active' : ''}`;
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'page-link';
+            button.textContent = label;
+            button.disabled = disabled;
+            if (active) button.setAttribute('aria-current', 'page');
+            button.addEventListener('click', () => onPageChange(page));
+            item.appendChild(button);
+            list.appendChild(item);
+        };
+        addButton('‹', currentPage - 1, currentPage === 1);
+        const visiblePages = new Set([1, totalPages]);
+        for (let page = Math.max(1, currentPage - 2); page <= Math.min(totalPages, currentPage + 2); page++) visiblePages.add(page);
+        let previousPage = 0;
+        [...visiblePages].sort((a, b) => a - b).forEach(page => {
+            if (previousPage && page - previousPage > 1) {
+                const gap = document.createElement('li');
+                gap.className = 'page-item disabled';
+                gap.innerHTML = '<span class="page-link">…</span>';
+                list.appendChild(gap);
+            }
+            addButton(String(page), page, false, page === currentPage);
+            previousPage = page;
+        });
+        addButton('›', currentPage + 1, currentPage === totalPages);
+    }
+
+    let activitiesCurrentPage = 1;
+    function filterActivities(resetPage = false) {
+        if (resetPage) activitiesCurrentPage = 1;
         const cards = document.querySelectorAll('#cap-intern-list .cap-intern-card, #reuniones-list .reunion-card');
         const searchText = activitySearchInput ? activitySearchInput.value.trim().toLowerCase() : '';
         const selectedType = activityTypeFilter ? activityTypeFilter.value : '';
         const selectedCompany = activityCompanyFilter ? activityCompanyFilter.value : '';
         const selectedDateFrom = activityDateFromFilter ? activityDateFromFilter.value : '';
         const selectedDateTo = activityDateToFilter ? activityDateToFilter.value : '';
-        let visibleCards = 0;
+        const matchingCards = [];
 
         cards.forEach(card => {
             const name = card.dataset.nombre || card.textContent.toLowerCase();
@@ -1163,25 +1226,32 @@ document.addEventListener('DOMContentLoaded', function () {
             const matchesDateTo = !selectedDateTo || (activityDate && activityDate <= selectedDateTo);
             const isVisible = matchesSearch && matchesType && matchesCompany && matchesDateFrom && matchesDateTo;
 
-            card.style.display = isVisible ? '' : 'none';
-            if (isVisible) visibleCards++;
+            if (isVisible) matchingCards.push(card);
         });
+        const totalPages = Math.max(1, Math.ceil(matchingCards.length / cardPageSize));
+        activitiesCurrentPage = Math.min(activitiesCurrentPage, totalPages);
+        const visibleCards = new Set(matchingCards.slice((activitiesCurrentPage - 1) * cardPageSize, activitiesCurrentPage * cardPageSize));
+        cards.forEach(card => { card.style.display = visibleCards.has(card) ? '' : 'none'; });
 
         const filtersApplied = Boolean(searchText || selectedType || selectedCompany || selectedDateFrom || selectedDateTo);
         if (noActivitiesFound) {
-            noActivitiesFound.style.display = filtersApplied && visibleCards === 0 ? 'block' : 'none';
+            noActivitiesFound.style.display = filtersApplied && matchingCards.length === 0 ? 'block' : 'none';
         }
         if (emptyActivitiesState) {
             emptyActivitiesState.style.display = cards.length === 0 && !filtersApplied ? 'block' : 'none';
         }
+        renderCardPagination('activitiesPaginationContainer', 'activitiesPaginationInfo', 'activitiesPagination', matchingCards.length, activitiesCurrentPage, page => {
+            activitiesCurrentPage = page;
+            filterActivities();
+        });
     }
 
-    if (activitySearchInput) activitySearchInput.addEventListener('input', filterActivities);
-    if (activityTypeFilter) activityTypeFilter.addEventListener('change', filterActivities);
-    if (activityCompanyFilter) activityCompanyFilter.addEventListener('change', filterActivities);
-    if (activityDateFromFilter) activityDateFromFilter.addEventListener('change', filterActivities);
-    if (activityDateToFilter) activityDateToFilter.addEventListener('change', filterActivities);
-    if (activityFilterButton) activityFilterButton.addEventListener('click', filterActivities);
+    if (activitySearchInput) activitySearchInput.addEventListener('input', () => filterActivities(true));
+    if (activityTypeFilter) activityTypeFilter.addEventListener('change', () => filterActivities(true));
+    if (activityCompanyFilter) activityCompanyFilter.addEventListener('change', () => filterActivities(true));
+    if (activityDateFromFilter) activityDateFromFilter.addEventListener('change', () => filterActivities(true));
+    if (activityDateToFilter) activityDateToFilter.addEventListener('change', () => filterActivities(true));
+    if (activityFilterButton) activityFilterButton.addEventListener('click', () => filterActivities(true));
     filterActivities();
 
     // --- Lógica de Filtrado para Cursos Oficiales ---
@@ -1194,7 +1264,9 @@ document.addEventListener('DOMContentLoaded', function () {
     const capacitacionesList = document.getElementById('capacitaciones-list');
     const noCursosRow = document.getElementById('no-cursos-found');
 
-    function filterCursos() {
+    let coursesCurrentPage = 1;
+    function filterCursos(resetPage = false) {
+        if (resetPage) coursesCurrentPage = 1;
         if (!capacitacionesList) return;
         const searchText = cursoSearchInput ? cursoSearchInput.value.toLowerCase() : '';
         const selectedMalla = mallaFilter ? mallaFilter.value.toLowerCase() : '';
@@ -1202,7 +1274,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const selectedDateFrom = cursoDateFromFilter ? cursoDateFromFilter.value : '';
         const selectedDateTo = cursoDateToFilter ? cursoDateToFilter.value : '';
         const cards = capacitacionesList.getElementsByClassName('capacitacion-card');
-        let visibleCards = 0;
+        const matchingCards = [];
 
         for (let i = 0; i < cards.length; i++) {
             const card = cards[i];
@@ -1218,24 +1290,29 @@ document.addEventListener('DOMContentLoaded', function () {
             const matchesDateTo = !selectedDateTo || (cursoDate && cursoDate <= selectedDateTo);
 
             if (matchesSearch && matchesMalla && matchesComp && matchesDateFrom && matchesDateTo) {
-                card.style.display = "";
-                visibleCards++;
-            } else {
-                card.style.display = "none";
+                matchingCards.push(card);
             }
         }
+        const totalPages = Math.max(1, Math.ceil(matchingCards.length / cardPageSize));
+        coursesCurrentPage = Math.min(coursesCurrentPage, totalPages);
+        const visibleCards = new Set(matchingCards.slice((coursesCurrentPage - 1) * cardPageSize, coursesCurrentPage * cardPageSize));
+        for (let i = 0; i < cards.length; i++) cards[i].style.display = visibleCards.has(cards[i]) ? '' : 'none';
 
         if (noCursosRow) {
-            noCursosRow.style.display = cards.length > 0 && visibleCards === 0 ? "block" : "none";
+            noCursosRow.style.display = cards.length > 0 && matchingCards.length === 0 ? "block" : "none";
         }
+        renderCardPagination('coursesPaginationContainer', 'coursesPaginationInfo', 'coursesPagination', matchingCards.length, coursesCurrentPage, page => {
+            coursesCurrentPage = page;
+            filterCursos();
+        });
     }
 
-    if (cursoSearchInput) cursoSearchInput.addEventListener('input', filterCursos);
-    if (mallaFilter) mallaFilter.addEventListener('change', filterCursos);
-    if (cursoCompaniaFilter) cursoCompaniaFilter.addEventListener('change', filterCursos);
-    if (cursoDateFromFilter) cursoDateFromFilter.addEventListener('change', filterCursos);
-    if (cursoDateToFilter) cursoDateToFilter.addEventListener('change', filterCursos);
-    if (cursoFilterButton) cursoFilterButton.addEventListener('click', filterCursos);
+    if (cursoSearchInput) cursoSearchInput.addEventListener('input', () => filterCursos(true));
+    if (mallaFilter) mallaFilter.addEventListener('change', () => filterCursos(true));
+    if (cursoCompaniaFilter) cursoCompaniaFilter.addEventListener('change', () => filterCursos(true));
+    if (cursoDateFromFilter) cursoDateFromFilter.addEventListener('change', () => filterCursos(true));
+    if (cursoDateToFilter) cursoDateToFilter.addEventListener('change', () => filterCursos(true));
+    if (cursoFilterButton) cursoFilterButton.addEventListener('click', () => filterCursos(true));
     filterCursos();
 
     // --- Búsqueda y paginación de la Lista de Abono ---
