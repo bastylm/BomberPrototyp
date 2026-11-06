@@ -117,6 +117,12 @@
         background-color: #dc3545;
         border-color: #dc3545;
     }
+    .inventory-list-pagination .page-link { color: #dc3545; }
+    .inventory-list-pagination .page-link:hover,
+    .inventory-list-pagination .page-link:focus { color: #b02a37; background-color: #fff5f5; border-color: #f1b0b7; }
+    .inventory-list-pagination .page-item.active .page-link { color: #fff; background-color: #dc3545; border-color: #dc3545; }
+    .inventory-list-pagination .page-item.disabled .page-link { color: #adb5bd; }
+    .inventory-list-pagination[hidden] { display: none !important; }
 
     /* En la vista de una compañía, los detalles del inventario quedan al lado izquierdo y la asignación al lado derecho. */
     .inventory-detail-layout {
@@ -347,9 +353,9 @@
                                                     <th scope="col" class="text-end">Acciones</th>
                                                 </tr>
                                             </thead>
-                                            <tbody>
+                                            <tbody data-inventory-paginated="true" data-pagination-id="inventoryAssignedPagination-{{ compania.id }}" data-pagination-label="personas">
                                                 {% for grupo in data.asignados %}
-                                                <tr class="align-middle">
+                                                <tr class="inventory-page-row align-middle">
                                                     <td>
                                                         <div class="d-flex align-items-center">
                                                             {% if grupo.usuario.foto_perfil %}
@@ -377,6 +383,10 @@
                                             </tbody>
                                         </table>
                                     </div>
+                                    <div id="inventoryAssignedPagination-{{ compania.id }}" class="inventory-list-pagination d-flex justify-content-between align-items-center flex-wrap gap-2 p-3 border-top" hidden>
+                                        <small class="inventory-pagination-info text-muted" aria-live="polite"></small>
+                                        <nav aria-label="Paginación de ítems asignados"><ul class="pagination pagination-sm mb-0"></ul></nav>
+                                    </div>
                                 </div>
 
                                 <!-- Carros de la compañía -->
@@ -390,9 +400,9 @@
                                                     <th scope="col" class="text-end">Acciones</th>
                                                 </tr>
                                             </thead>
-                                            <tbody>
+                                            <tbody data-inventory-paginated="true" data-pagination-id="inventoryCarsPagination-{{ compania.id }}" data-pagination-label="carros">
                                                 {% for grupo_v in data.asignados_vehiculos %}
-                                                <tr class="vehiculo-row">
+                                                <tr class="inventory-page-row vehiculo-row">
                                                     <td>
                                                         <strong><i class="bi bi-truck-front me-1"></i>{{ grupo_v.vehiculo.nombre }}</strong>
                                                         <span class="badge {% if grupo_v.vehiculo.estado == 'Disponible' %}bg-success{% elif grupo_v.vehiculo.estado == 'En Servicio' or grupo_v.vehiculo.estado == 'En Taller' %}bg-warning text-dark{% else %}bg-danger{% endif %}">{{ grupo_v.vehiculo.get_estado_display }}</span>
@@ -418,6 +428,10 @@
                                             </tbody>
                                         </table>
                                     </div>
+                                    <div id="inventoryCarsPagination-{{ compania.id }}" class="inventory-list-pagination d-flex justify-content-between align-items-center flex-wrap gap-2 p-3 border-top" hidden>
+                                        <small class="inventory-pagination-info text-muted" aria-live="polite"></small>
+                                        <nav aria-label="Paginación de carros"><ul class="pagination pagination-sm mb-0"></ul></nav>
+                                    </div>
                                 </div>
 
                                 <!-- Contenido de Ítems Disponibles -->
@@ -433,9 +447,9 @@
                                                     <th scope="col">Acciones</th>
                                                 </tr>
                                             </thead>
-                                            <tbody>
+                                            <tbody data-inventory-paginated="true" data-pagination-id="inventoryStockPagination-{{ compania.id }}" data-pagination-label="ítems">
                                                 {% for item_agrupado in data.disponibles_agrupados %}
-                                                <tr class="align-middle">
+                                                <tr class="inventory-page-row align-middle">
                                                     <td><strong>{{ item_agrupado.nombre_completo|default:item_agrupado.nombre }}</strong></td>
                                                     <td>{{ item_agrupado.ubicacion }}</td>
                                                     <td>
@@ -479,6 +493,10 @@
                                                 {% endfor %}
                                             </tbody>
                                         </table>
+                                    </div>
+                                    <div id="inventoryStockPagination-{{ compania.id }}" class="inventory-list-pagination d-flex justify-content-between align-items-center flex-wrap gap-2 p-3 border-top" hidden>
+                                        <small class="inventory-pagination-info text-muted" aria-live="polite"></small>
+                                        <nav aria-label="Paginación de disponibilidad en bodega"><ul class="pagination pagination-sm mb-0"></ul></nav>
                                     </div>
                                 </div>
                             </div>
@@ -1324,6 +1342,62 @@ document.addEventListener('DOMContentLoaded', function () {
             resumenGeneralPagination.hidden = true;
         }
     }
+
+    document.querySelectorAll('tbody[data-inventory-paginated="true"]').forEach(tbody => {
+        const filas = Array.from(tbody.querySelectorAll('tr.inventory-page-row'));
+        const contenedor = document.getElementById(tbody.dataset.paginationId);
+        if (!contenedor || !filas.length) return;
+        const info = contenedor.querySelector('.inventory-pagination-info');
+        const lista = contenedor.querySelector('.pagination');
+        const filasPorPagina = 10;
+        let paginaActual = 1;
+
+        function mostrarPagina(pagina) {
+            const totalPaginas = Math.ceil(filas.length / filasPorPagina);
+            paginaActual = Math.max(1, Math.min(pagina, totalPaginas));
+            const inicio = (paginaActual - 1) * filasPorPagina;
+            filas.forEach((fila, indice) => {
+                fila.style.display = indice >= inicio && indice < inicio + filasPorPagina ? '' : 'none';
+            });
+            info.textContent = `Mostrando ${inicio + 1}–${Math.min(inicio + filasPorPagina, filas.length)} de ${filas.length} ${tbody.dataset.paginationLabel}`;
+            lista.replaceChildren();
+            contenedor.hidden = totalPaginas <= 1;
+            if (totalPaginas <= 1) return;
+
+            const agregarBoton = (etiqueta, numero, deshabilitado = false, activo = false) => {
+                const elemento = document.createElement('li');
+                elemento.className = `page-item${deshabilitado ? ' disabled' : ''}${activo ? ' active' : ''}`;
+                const boton = document.createElement('button');
+                boton.type = 'button';
+                boton.className = 'page-link';
+                boton.textContent = etiqueta;
+                boton.disabled = deshabilitado;
+                if (activo) boton.setAttribute('aria-current', 'page');
+                boton.addEventListener('click', () => mostrarPagina(numero));
+                elemento.appendChild(boton);
+                lista.appendChild(elemento);
+            };
+
+            agregarBoton('‹', paginaActual - 1, paginaActual === 1);
+            const paginasVisibles = new Set([1, totalPaginas]);
+            for (let numero = Math.max(1, paginaActual - 2); numero <= Math.min(totalPaginas, paginaActual + 2); numero++) paginasVisibles.add(numero);
+            let paginaAnterior = 0;
+            [...paginasVisibles].sort((a, b) => a - b).forEach(numero => {
+                if (paginaAnterior && numero - paginaAnterior > 1) {
+                    const puntos = document.createElement('li');
+                    puntos.className = 'page-item disabled';
+                    puntos.innerHTML = '<span class="page-link">…</span>';
+                    lista.appendChild(puntos);
+                }
+                agregarBoton(String(numero), numero, false, numero === paginaActual);
+                paginaAnterior = numero;
+            });
+            agregarBoton('›', paginaActual + 1, paginaActual === totalPaginas);
+        }
+
+        if (filas.length > filasPorPagina) mostrarPagina(1);
+        else contenedor.hidden = true;
+    });
 
     // Objeto para mapear usuarios a compañías
     const usuariosPorCompania = {
