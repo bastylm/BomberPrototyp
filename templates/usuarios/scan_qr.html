@@ -52,40 +52,6 @@
                         <p class="mt-2 text-muted fw-medium text-uppercase small" style="letter-spacing: 1px;">Consultando registros...</p>
                     </div>
 
-                    <!-- Contenedor de Resultados (Éxito) -->
-                    <div id="result-container" class="mt-4 text-start d-none">
-                        <div class="card border-success shadow-sm rounded-3 mb-0 overflow-hidden">
-                            <div class="card-header bg-success text-white py-2">
-                                <div class="d-flex align-items-center">
-                                    <i class="bi bi-check-circle-fill fs-5 me-2"></i>
-                                    <h6 class="mb-0 fw-bold text-uppercase" style="letter-spacing: 0.5px;">Equipo Verificado</h6>
-                                </div>
-                            </div>
-                            <div class="card-body bg-success-subtle position-relative">
-                                <div class="position-absolute top-50 end-0 translate-middle-y opacity-10 p-3">
-                                    <i class="bi bi-shield-check" style="font-size: 5rem;"></i>
-                                </div>
-                                
-                                <h5 class="mb-1 fw-bold text-success-emphasis" id="item-name">Nombre del Ítem</h5>
-                                <p class="text-muted small mb-3 text-uppercase" style="font-size: 0.75rem;"><i class="bi bi-geo-alt-fill me-1"></i>Asignación Registrada</p>
-                                
-                                <div class="d-flex align-items-center bg-body p-3 rounded-3 border border-success-subtle shadow-sm position-relative z-1 dark-mode-adjust">
-                                    <div class="flex-shrink-0" id="user-photo-container"></div>
-                                    <div class="flex-grow-1 ms-3">
-                                        <p class="mb-0 text-muted small text-uppercase fw-bold" style="font-size: 0.7rem;" id="assignment-label">Responsable Actual</p>
-                                        <h6 class="mb-0 fw-bold text-dark force-black-text" id="user-name">Nombre del Usuario</h6>
-                                    </div>
-                                </div>
-                                
-                                <div class="text-center mt-4 position-relative z-1">
-                                    <button class="btn btn-success btn-sm px-4 fw-bold text-uppercase" style="letter-spacing: 0.5px;" onclick="resetScanner()">
-                                        <i class="bi bi-arrow-clockwise me-1"></i> Nueva Consulta
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
                     <!-- Contenedor de Errores -->
                     <div id="error-container" class="mt-4 text-start d-none">
                         <div class="card border-danger shadow-sm rounded-3 mb-0 overflow-hidden">
@@ -145,6 +111,32 @@
         </div>
     </div>
 </div>
+<div class="modal fade" id="qrItemResultModal" tabindex="-1" aria-labelledby="qrItemResultModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content border-success shadow-lg overflow-hidden">
+            <div class="modal-header bg-success text-white">
+                <h5 class="modal-title fw-bold" id="qrItemResultModalLabel"><i class="bi bi-check-circle-fill me-2"></i>Equipo verificado</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+            </div>
+            <div class="modal-body bg-success-subtle">
+                <h5 class="mb-1 fw-bold text-success-emphasis" id="item-name">Nombre del ítem</h5>
+                <p class="text-muted small mb-3 text-uppercase"><i class="bi bi-geo-alt-fill me-1"></i>Asignación registrada</p>
+                <div class="d-flex align-items-center bg-body p-3 rounded-3 border border-success-subtle shadow-sm dark-mode-adjust">
+                    <div class="flex-shrink-0" id="user-photo-container"></div>
+                    <div class="flex-grow-1 ms-3">
+                        <p class="mb-0 text-muted small text-uppercase fw-bold" id="assignment-label">Responsable actual</p>
+                        <h6 class="mb-0 fw-bold text-dark force-black-text" id="user-name">Nombre del usuario</h6>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer justify-content-center">
+                <button type="button" class="btn btn-success fw-bold" data-bs-dismiss="modal">
+                    <i class="bi bi-arrow-clockwise me-1"></i>Nueva consulta
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -187,8 +179,18 @@
 
 <script>
     let html5QrcodeScanner;
+    let qrItemResultModal;
+    let scanInProgress = false;
 
     document.addEventListener("DOMContentLoaded", function() {
+        const resultModalElement = document.getElementById('qrItemResultModal');
+        qrItemResultModal = new bootstrap.Modal(resultModalElement);
+        resultModalElement.addEventListener('hidden.bs.modal', function() {
+            scanInProgress = false;
+            if (html5QrcodeScanner) {
+                try { html5QrcodeScanner.resume(); } catch(e) {}
+            }
+        });
         startScanner();
         
         // Lógica para procesar la subida de imagen
@@ -201,7 +203,6 @@
             
             // Mostrar indicador de carga
             document.getElementById('loading').classList.remove('d-none');
-            document.getElementById('result-container').classList.add('d-none');
             document.getElementById('error-container').classList.add('d-none');
             
             if(html5QrcodeScanner) {
@@ -249,11 +250,12 @@
     }
 
     function onScanSuccess(decodedText, decodedResult) {
+        if (scanInProgress) return;
+        scanInProgress = true;
         if(html5QrcodeScanner) {
             try { html5QrcodeScanner.pause(); } catch(e) {}
         }
         document.getElementById('loading').classList.remove('d-none');
-        document.getElementById('result-container').classList.add('d-none');
         document.getElementById('error-container').classList.add('d-none');
 
         fetch(`{% url 'inventario_qr_lookup' %}?qr_content=${encodeURIComponent(decodedText)}`, {
@@ -263,6 +265,7 @@
         .then(data => {
             document.getElementById('loading').classList.add('d-none');
             if (data.error) {
+                scanInProgress = false;
                 document.getElementById('error-message').textContent = data.error;
                 document.getElementById('error-container').classList.remove('d-none');
             } else {
@@ -285,9 +288,10 @@
                     photoContainer.innerHTML = `<div class="rounded-circle bg-danger text-white d-flex align-items-center justify-content-center shadow-sm" style="width: 55px; height: 55px; border: 3px solid white;"><i class="bi bi-truck fs-4"></i></div>`;
                 }
                 
-                document.getElementById('result-container').classList.remove('d-none');
+                qrItemResultModal.show();
             }
         }).catch(err => {
+            scanInProgress = false;
             document.getElementById('loading').classList.add('d-none');
             document.getElementById('error-message').textContent = "Error de conexión al consultar el código.";
             document.getElementById('error-container').classList.remove('d-none');
@@ -295,7 +299,11 @@
     }
 
     function resetScanner() {
-        document.getElementById('result-container').classList.add('d-none');
+        if (qrItemResultModal && document.getElementById('qrItemResultModal').classList.contains('show')) {
+            qrItemResultModal.hide();
+            return;
+        }
+        scanInProgress = false;
         document.getElementById('error-container').classList.add('d-none');
         
         if(html5QrcodeScanner) {
