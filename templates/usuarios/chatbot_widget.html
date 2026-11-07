@@ -1,5 +1,5 @@
 <div class="erpbot{% if request.resolver_match.url_name == 'mantenimiento' %} erpbot-maintenance{% endif %}" data-endpoint="{% url 'chatbot_api' %}">
-    <button class="erpbot-toggle" type="button" aria-label="Abrir asistente" aria-expanded="false" aria-controls="erpbot-panel">
+    <button class="erpbot-toggle" type="button" aria-label="Abrir asistente" title="Arrastra para mover el botón" aria-expanded="false" aria-controls="erpbot-panel">
         <i class="bi bi-chat-dots-fill" aria-hidden="true"></i>
     </button>
     <section class="erpbot-panel" id="erpbot-panel" aria-label="Asistente del sistema" hidden>
@@ -22,14 +22,18 @@
 <style>
     .erpbot { position: fixed; right: 1.25rem; bottom: 1.25rem; z-index: 1040; font-family: inherit; }
     .erpbot.erpbot-maintenance { bottom: 5.25rem; }
-    .erpbot-toggle { width: 3.5rem; height: 3.5rem; border: 0; border-radius: 50%; color: #fff; background: #dc3545; box-shadow: 0 4px 16px #0003; font-size: 1.35rem; }
+    .erpbot-toggle { width: 3.5rem; height: 3.5rem; border: 0; border-radius: 50%; color: #fff; background: #dc3545; box-shadow: 0 4px 16px #0003; font-size: 1.35rem; cursor: grab; touch-action: none; user-select: none; }
+    .erpbot-toggle:active { cursor: grabbing; }
     .erpbot-toggle:hover { background: #bb2d3b; }
     .erpbot-panel { position: absolute; right: 0; bottom: 4.25rem; display: flex; flex-direction: column; width: min(24rem, calc(100vw - 2rem)); height: min(34rem, calc(100vh - 7rem)); overflow: hidden; background: var(--bs-body-bg, #fff); color: var(--bs-body-color, #212529); border: 1px solid var(--bs-border-color, #dee2e6); border-radius: 1rem; box-shadow: 0 10px 34px #0003; }
+    .erpbot-panel.erpbot-panel-down { top: 4.25rem; bottom: auto; }
+    .erpbot-panel.erpbot-panel-align-left { left: 0; right: auto; }
+    .erpbot-panel.erpbot-panel-align-right { left: auto; right: 0; }
     .erpbot-panel[hidden] { display: none; }
     .erpbot-header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: .9rem 1rem; color: white; background: #dc3545; }
     .erpbot-header small { display: block; opacity: .88; font-size: .72rem; margin-top: .15rem; }
     .erpbot-close { border: 0; background: transparent; color: white; font-size: 1.6rem; line-height: 1; }
-    .erpbot-messages { flex: 1; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; align-items: flex-start; gap: .65rem; }
+    .erpbot-messages { flex: 1; min-height: 0; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; align-items: flex-start; gap: .65rem; }
     .erpbot-message { max-width: 92%; padding: .65rem .8rem; border-radius: .8rem; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .9rem; }
     .erpbot-answer { background: var(--bs-tertiary-bg, #f1f3f5); }
     .erpbot-question { align-self: flex-end; background: #dc3545; color: white; }
@@ -51,9 +55,102 @@ document.addEventListener('DOMContentLoaded', function () {
     const form = root.querySelector('.erpbot-form');
     const input = root.querySelector('#erpbot-input');
     const messages = root.querySelector('.erpbot-messages');
+    const positionStorageKey = 'bomberprototyp-chatbot-position-v1';
+    const dragThreshold = 5;
+    let customPosition = false;
+    let dragState = null;
+    let suppressClickUntil = 0;
+
+    function clampPosition(left, top) {
+        const margin = 12;
+        const maxLeft = Math.max(margin, window.innerWidth - toggle.offsetWidth - margin);
+        const maxTop = Math.max(margin, window.innerHeight - toggle.offsetHeight - margin);
+        return {
+            left: Math.max(margin, Math.min(left, maxLeft)),
+            top: Math.max(margin, Math.min(top, maxTop))
+        };
+    }
+
+    function applyPosition(left, top) {
+        const position = clampPosition(left, top);
+        root.style.left = `${position.left}px`;
+        root.style.top = `${position.top}px`;
+        root.style.right = 'auto';
+        root.style.bottom = 'auto';
+        customPosition = true;
+        if (!panel.hidden) positionPanel();
+    }
+
+    function savePosition() {
+        if (!customPosition) return;
+        const rect = toggle.getBoundingClientRect();
+        try {
+            localStorage.setItem(positionStorageKey, JSON.stringify({ left: rect.left, top: rect.top }));
+        } catch (_) {}
+    }
+
+    function loadPosition() {
+        try {
+            const saved = JSON.parse(localStorage.getItem(positionStorageKey) || 'null');
+            if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) applyPosition(saved.left, saved.top);
+        } catch (_) {}
+    }
+
+    function positionPanel() {
+        const rect = toggle.getBoundingClientRect();
+        const gap = 12;
+        const spaceAbove = Math.max(0, rect.top - gap);
+        const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - gap);
+        const openDown = spaceBelow >= spaceAbove;
+        const availableHeight = openDown ? spaceBelow : spaceAbove;
+        const panelHeight = Math.max(1, Math.min(544, availableHeight));
+        const panelWidth = Math.min(384, Math.max(240, window.innerWidth - 32));
+        const alignLeft = rect.left + panelWidth <= window.innerWidth - 12;
+
+        panel.classList.toggle('erpbot-panel-down', openDown);
+        panel.classList.toggle('erpbot-panel-align-left', alignLeft);
+        panel.classList.toggle('erpbot-panel-align-right', !alignLeft);
+        panel.style.height = `${panelHeight}px`;
+    }
+
+    loadPosition();
+    toggle.addEventListener('pointerdown', function (event) {
+        if (event.pointerType === 'mouse' && event.button !== 0) return;
+        const rect = toggle.getBoundingClientRect();
+        dragState = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, left: rect.left, top: rect.top, moved: false };
+        toggle.setPointerCapture(event.pointerId);
+    });
+    toggle.addEventListener('pointermove', function (event) {
+        if (!dragState || dragState.pointerId !== event.pointerId) return;
+        const deltaX = event.clientX - dragState.startX;
+        const deltaY = event.clientY - dragState.startY;
+        if (!dragState.moved && Math.hypot(deltaX, deltaY) < dragThreshold) return;
+        dragState.moved = true;
+        event.preventDefault();
+        applyPosition(dragState.left + deltaX, dragState.top + deltaY);
+    });
+    function finishDrag(event) {
+        if (!dragState || dragState.pointerId !== event.pointerId) return;
+        if (dragState.moved) {
+            savePosition();
+            suppressClickUntil = Date.now() + 350;
+        }
+        dragState = null;
+    }
+    toggle.addEventListener('pointerup', finishDrag);
+    toggle.addEventListener('pointercancel', finishDrag);
+    window.addEventListener('resize', function () {
+        if (customPosition) {
+            const rect = toggle.getBoundingClientRect();
+            applyPosition(rect.left, rect.top);
+            savePosition();
+        }
+        if (!panel.hidden) positionPanel();
+    });
 
     function setOpen(open) {
         panel.hidden = !open;
+        if (open) positionPanel();
         toggle.setAttribute('aria-expanded', String(open));
         toggle.setAttribute('aria-label', open ? 'Cerrar asistente' : 'Abrir asistente');
         if (open) input.focus();
@@ -78,7 +175,10 @@ document.addEventListener('DOMContentLoaded', function () {
         messages.scrollTop = messages.scrollHeight;
     }
 
-    toggle.addEventListener('click', () => setOpen(panel.hidden));
+    toggle.addEventListener('click', function () {
+        if (Date.now() < suppressClickUntil) return;
+        setOpen(panel.hidden);
+    });
     close.addEventListener('click', () => setOpen(false));
     form.addEventListener('submit', async function (event) {
         event.preventDefault();
