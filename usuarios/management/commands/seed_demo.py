@@ -10,10 +10,14 @@ from usuarios.models import (
     CajaChica,
     Compania,
     Emergencia,
+    EmergenciaUnidad,
     Inventario,
     Mantenimiento,
     Proyecto,
+    RondaVehiculo,
     Rol,
+    SalidaTerreno,
+    SalidaTerrenoUnidad,
     Usuario,
     Vehiculo,
 )
@@ -209,7 +213,7 @@ class Command(BaseCommand):
                     'combustible': ['Diesel', 'Gasolina', 'Otro'][i % 3],
                 },
             )
-            Emergencia.objects.get_or_create(
+            emergencia, _ = Emergencia.objects.get_or_create(
                 direccion=f'Dirección ficticia Demo {i:03d}',
                 defaults={
                     'tipo': tipos_emergencia[i % len(tipos_emergencia)],
@@ -222,13 +226,56 @@ class Command(BaseCommand):
                     'registro_completado': True,
                 },
             )
+            emergencia.asistentes.set([brigadista])
+            emergencia_unidad, _ = EmergenciaUnidad.objects.get_or_create(
+                emergencia=emergencia,
+                unidad=vehiculo,
+            )
+            emergencia_unidad.asistentes.set([brigadista])
+
+            fecha_salida = timezone.now() - timedelta(days=i * 2, hours=i % 12)
+            salida, _ = SalidaTerreno.objects.get_or_create(
+                motivo=f'Salida operativa Demo {i:03d}',
+                defaults={
+                    'direccion': f'Sector ficticio {1 + i % 12}, Zona Demo',
+                    'fecha_hora_salida': fecha_salida,
+                    'fecha_hora_regreso': fecha_salida + timedelta(hours=1 + i % 3),
+                    'unidades_involucradas': vehiculo.nombre,
+                    'kilometraje_salida': 10000 + i * 137,
+                    'kilometraje_regreso': 10000 + i * 137 + 8 + (i % 45),
+                    'personal_a_cargo': brigadista,
+                    'descripcion': (
+                        'Novedad ficticia: revisión preventiva de equipo.' if i % 4 == 0
+                        else 'Salida de demostración sin novedad.'
+                    ),
+                    'creado_por': admin,
+                },
+            )
+            salida.unidades.add(vehiculo)
+            salida_unidad, _ = SalidaTerrenoUnidad.objects.get_or_create(
+                salida=salida,
+                unidad=vehiculo,
+            )
+            salida_unidad.asistentes.set([brigadista])
+
+            RondaVehiculo.objects.get_or_create(
+                vehiculo=vehiculo,
+                detalle=f'Ronda ficticia Demo {i:03d}: revisión de luces, neumáticos y combustible.',
+                defaults={
+                    'registrado_por': brigadista,
+                    'tipo_hallazgo': ['Sin novedad', 'Observación', 'Falla'][i % 3],
+                    'estado_operativo': vehiculo.estado,
+                },
+            )
+
             Capacitacion.objects.get_or_create(
-                nombre=f'Capacitación Demo {i:03d}',
+                nombre=f'Práctica de maquinistas Demo {i:03d}',
                 defaults={
                     'tipo_actividad': ['Curso', 'Taller', 'Charla', 'Reunión'][i % 4],
                     'malla': ['Nivel postulante', 'Nivel inicial', 'Nivel operativo', 'Otros'][i % 4],
-                    'descripcion': f'Actividad ficticia de demostración número {i}.',
-                    'fecha_inicio': timezone.now() + timedelta(days=i),
+                    'descripcion': f'Práctica ficticia de maquinistas para la demostración, sesión {i}.',
+                    'fecha_inicio': timezone.now() - timedelta(days=i * 3),
+                    'fecha_fin': timezone.now() - timedelta(days=i * 3) + timedelta(hours=1 + i % 3),
                     'lugar': f'Recinto Demo {1 + i % 5}',
                     'instructor': f'Instructor Demo {1 + i % 8}',
                     'cupos': 10 + (i % 31),
@@ -271,14 +318,20 @@ class Command(BaseCommand):
             )
             CajaChica.objects.get_or_create(
                 compania=compania,
-                descripcion=f'Movimiento Demo {i:03d}',
+                descripcion=(
+                    f'Combustible para {vehiculo.nombre} - carga ficticia Demo {i:03d}'
+                    if i % 3 == 0 else f'Materiales y operación Demo {i:03d}'
+                ),
                 defaults={
-                    'tipo': ['Ingreso', 'Egreso'][i % 2],
+                    'tipo': 'Egreso' if i % 3 == 0 else ['Ingreso', 'Egreso'][i % 2],
                     'tipo_cuenta': ['caja_propia', 'cuenta_bancaria'][i % 2],
-                    'monto': f'{10000 + i * 5000}.00',
+                    'monto': f'{45000 + i * 12500 if i % 3 == 0 else 10000 + i * 5000}.00',
                     'responsable': admin,
                 },
             )
 
-        self.stdout.write(self.style.SUCCESS(f'Datos ficticios cargados: lote de hasta {cantidad} registros por módulo.'))
+        self.stdout.write(self.style.SUCCESS(
+            f'Datos ficticios cargados: hasta {cantidad} registros por módulo, '
+            'incluyendo salidas, asistencias por unidad, rondas y prácticas de maquinistas.'
+        ))
         self.stdout.write(f'Administrador de demo: {email}')
