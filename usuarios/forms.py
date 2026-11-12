@@ -7,6 +7,7 @@ from django.db.models import Sum, Case, When, DecimalField, F, Q
 from django.utils import timezone
 from .models import Usuario, Compania, Rol, Proyecto, Documento, Carpeta, SalidaTerreno, SalidaTerrenoUnidad, Emergencia, EmergenciaUnidad, Capacitacion, Mantenimiento, Inventario, CajaChica, Aviso, PasswordResetCode, Vehiculo, RondaVehiculo
 from .validators import validar_rut_chileno, formatear_rut
+from .privacidad import rut_es_oculto
 from .inventory_permissions import puede_gestionar_inventario_global
 
 
@@ -191,6 +192,11 @@ class AdminUserChangeForm(forms.ModelForm):
         # el valor en la solicitud POST, evitando que el RUT se guarde en blanco.
         self.fields['rut'].widget.attrs['readonly'] = True
         self.fields['rut'].widget.attrs['class'] = self.fields['rut'].widget.attrs.get('class', '') + ' bg-light text-muted'
+
+    def clean_rut(self):
+        if self.instance.pk and rut_es_oculto(self.instance.rut):
+            return self.instance.rut
+        return self.cleaned_data.get('rut')
 
 class RolForm(forms.ModelForm):
     class Meta:

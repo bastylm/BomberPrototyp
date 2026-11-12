@@ -5,6 +5,7 @@ Django settings for bomberosM project.
 from pathlib import Path
 import os
 import sys
+import re
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -35,6 +36,11 @@ if not DEBUG and SECRET_KEY == 'local-development-key-only':
 
 ALLOWED_HOSTS = [h.strip() for h in os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',') if h.strip()]
 CSRF_TRUSTED_ORIGINS = [v.strip() for v in os.environ.get('CSRF_TRUSTED_ORIGINS', '').split(',') if v.strip()]
+RUTS_OCULTOS = {
+    re.sub(r'[^0-9kK]', '', value).upper()
+    for value in os.environ.get('RUTS_OCULTOS', '').split(',')
+    if value.strip()
+}
 
 
 # Application definition

@@ -1,4 +1,5 @@
 {% extends 'base_con_condicion.html' %}
+{% load privacidad %}
 
 {% block title %}Cursos y Capacitaciones - {{ block.super }}{% endblock %}
 
@@ -615,7 +616,7 @@
                         </thead>
                         <tbody id="abonoTableBody">
                             {% for u in lista_abono %}
-                            <tr class="abono-row" data-nombre="{{ u.get_full_name|lower }}" data-rut="{{ u.rut|default:''|lower }}">
+                            <tr class="abono-row" data-nombre="{{ u.get_full_name|lower }}" data-rut="{{ u.rut|rut_privado|default:''|lower }}">
                                 <td class="ps-3">
                                     <div class="d-flex align-items-center">
                                         <div class="text-white rounded-circle d-flex align-items-center justify-content-center me-3 shadow-sm fw-bold" 
@@ -625,7 +626,7 @@
                                         <div>
                                             <div class="fw-bold text-dark">{{ u.get_full_name }}</div>
                                             <div class="small d-flex align-items-center gap-2 mt-1 flex-wrap">
-                                                <span class="text-muted"><i class="bi bi-person-vcard me-1"></i>{{ u.rut|default:"Sin RUT" }}</span>
+                                                <span class="text-muted"><i class="bi bi-person-vcard me-1"></i>{{ u.rut|rut_privado|default:"Sin RUT" }}</span>
                                                 {% if u.compania %}
                                                 <span class="badge bg-light text-dark border px-2 py-1"><i class="bi bi-shield-fill text-danger me-1"></i>{{ u.compania.nombre }}</span>
                                                 {% else %}

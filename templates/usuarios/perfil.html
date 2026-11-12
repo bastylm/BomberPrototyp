@@ -1,5 +1,6 @@
 {% extends 'base_con_condicion.html' %}
 {% load humanize %}
+{% load privacidad %}
 
 {% block title %}Mi Perfil - {{ block.super }}{% endblock %}
 
@@ -200,7 +201,7 @@
                         <small class="text-muted text-uppercase fw-semibold d-block mb-1" style="font-size: 0.75rem; letter-spacing: 0.5px;">RUT</small>
                         <div class="d-flex align-items-center">
                             <i class="bi bi-person-badge-fill text-secondary opacity-50 me-2 fs-5"></i>
-                            <span class="fs-6 fw-medium">{{ user.rut|default:"No especificado" }}</span>
+                            <span class="fs-6 fw-medium">{{ user.rut|rut_privado|default:"No especificado" }}</span>
                         </div>
                     </div>
                     <div class="mb-4">

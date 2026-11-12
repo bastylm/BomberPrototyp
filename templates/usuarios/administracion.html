@@ -1,4 +1,5 @@
 {% extends 'base_con_condicion.html' %}
+{% load privacidad %}
 
 {% block title %}Administración - {{ block.super }}{% endblock %}
 
@@ -211,7 +212,7 @@
                                 <tr>
                                     <td>{{ user.get_full_name }}</td>
                                     <td>{{ user.email }}</td>
-                                    <td>{{ user.rut|default:"-" }}</td>
+                                    <td>{{ user.rut|rut_privado|default:"-" }}</td>
                                     <td>{{ user.clave_radial|default:"-" }}</td>
                                     <td>{{ user.compania.nombre|default:"-" }}</td>
                                     <td>{{ user.date_joined|date:"d/m/Y" }}</td>
@@ -312,7 +313,7 @@
                                                     data-user-nombre="{{ user.nombre }}"
                                                     data-user-apellido="{{ user.apellido }}"
                                                     data-user-email="{{ user.email }}"
-                                                    data-user-rut="{{ user.rut|default:'' }}"
+                                                    data-user-rut="{{ user.rut|rut_privado|default:'' }}"
                                                     data-user-clave_radial="{{ user.clave_radial|default:'' }}"
                                                     data-user-rol="{{ user.rol.id|default:'' }}"
                                                     data-user-compania="{{ user.compania.id|default:'' }}"
