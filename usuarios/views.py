@@ -12,6 +12,7 @@ from django.db.models import Sum, Case, When, DecimalField, F, Q, Count, Prefetc
 from django.utils import timezone
 from django.db.models.functions import TruncDay
 from datetime import datetime, timedelta
+from collections import defaultdict
 import json, re
 import random
 import secrets
@@ -345,6 +346,7 @@ def dashboard_view(request):
     
     modules = [
         {'id': 'dashboard_summary', 'url_name': 'dashboard_summary', 'icon': 'bi-bar-chart-line-fill', 'title': 'Ver Resumen General', 'desc': 'Visualiza KPIs, gráficos y actividad reciente del sistema.'},
+        {'id': 'estadisticas_operativas', 'url_name': 'estadisticas_operativas', 'icon': 'bi-graph-up-arrow', 'title': 'Estadísticas Operativas', 'desc': 'Analiza emergencias, unidades, asistencia, combustible, rondas y prácticas.'},
         {'id': 'documentos', 'url_name': 'documentos', 'icon': 'bi-file-earmark-text-fill', 'title': 'Documentos', 'desc': 'Gestión de documentos e informes'},
         {'id': 'inventario', 'url_name': 'inventario', 'icon': 'bi-box-seam-fill', 'title': 'Inventario', 'desc': 'Control de equipos y herramientas'},
         {'id': 'salidas', 'url_name': 'salidas_terreno', 'icon': 'bi-truck-front-fill', 'title': 'Salidas a Terreno', 'desc': 'Registro y seguimiento de operaciones'},
@@ -381,6 +383,7 @@ def dashboard_view(request):
             # Módulos controlados mediante los permisos configurados en el Rol
             if rol:
                 if m['id'] == 'dashboard_summary' and rol.ver_resumen_general: filtered_modules.append(m)
+                elif m['id'] == 'estadisticas_operativas' and rol.ver_estadisticas_operativas: filtered_modules.append(m)
                 elif m['id'] == 'documentos' and rol.ver_documentacion: filtered_modules.append(m)
                 elif m['id'] == 'inventario' and rol.ver_inventario: filtered_modules.append(m)
                 elif m['id'] == 'salidas' and rol.ver_salidas_terreno: filtered_modules.append(m)
@@ -555,6 +558,243 @@ def dashboard_summary_view(request):
         'nombre_caja': nombre_caja,
     }
     return render(request, 'usuarios/dashboard_summary.html', context)
+
+
+@login_required
+def estadisticas_operativas_view(request):
+    if not request.user.is_superuser and not (request.user.rol and request.user.rol.ver_estadisticas_operativas):
+        messages.error(request, 'No tienes permiso para acceder a Estadísticas Operativas.')
+        return redirect('dashboard')
+
+    year_value = (request.GET.get('periodo') or str(timezone.localdate().year)).strip()
+    current_year = timezone.localdate().year
+    year = int(year_value) if year_value.isdigit() and 2000 <= int(year_value) <= current_year + 1 else current_year
+    all_years = year_value == 'todos'
+    selected_period = 'todos' if all_years else str(year)
+    if all_years:
+        period_start = None
+        period_end = None
+    else:
+        period_start = timezone.make_aware(datetime(year, 1, 1))
+        period_end = timezone.make_aware(datetime(year + 1, 1, 1))
+
+    def filter_period(queryset, field):
+        if period_start is None:
+            return queryset
+        return queryset.filter(**{f'{field}__gte': period_start, f'{field}__lt': period_end})
+
+    company_id = request.user.compania_id
+    emergencies = Emergencia.objects.exclude(fecha_hora_alarma__isnull=True)
+    outings = SalidaTerreno.objects.all()
+    fuel_entries = CajaChica.objects.filter(tipo='Egreso')
+    rounds = RondaVehiculo.objects.select_related('vehiculo', 'registrado_por__rol')
+    practices = Capacitacion.objects.filter(
+        Q(nombre__icontains='maquinista') | Q(nombre__icontains='práctica') | Q(nombre__icontains='practica')
+        | Q(descripcion__icontains='maquinista') | Q(descripcion__icontains='práctica') | Q(descripcion__icontains='practica')
+    ).filter(fecha_fin__isnull=False).prefetch_related('asistentes__compania')
+    if not request.user.is_superuser:
+        if company_id:
+            emergencies = emergencies.filter(
+                Q(asistentes__compania_id=company_id)
+                | Q(unidades_asistencia__unidad__compania_id=company_id)
+                | Q(creado_por__compania_id=company_id)
+            ).distinct()
+            outings = outings.filter(
+                Q(unidades__compania_id=company_id) | Q(personal_a_cargo__compania_id=company_id)
+            ).distinct()
+            fuel_entries = fuel_entries.filter(compania_id=company_id)
+            rounds = rounds.filter(vehiculo__compania_id=company_id)
+            practices = practices.filter(
+                Q(asistentes__compania_id=company_id) | Q(companias_invitadas__id=company_id)
+            ).distinct()
+        else:
+            emergencies = Emergencia.objects.none()
+            outings = SalidaTerreno.objects.none()
+            fuel_entries = CajaChica.objects.none()
+            rounds = RondaVehiculo.objects.none()
+            practices = Capacitacion.objects.none()
+
+    emergencies = filter_period(emergencies, 'fecha_hora_alarma').prefetch_related(
+        'asistentes__compania', 'asistentes__rol',
+        'unidades_asistencia__asistentes__compania', 'unidades_asistencia__asistentes__rol',
+        'unidades_asistencia__unidad',
+    )
+    outings = filter_period(outings, 'fecha_hora_salida').prefetch_related('unidades')
+    fuel_entries = filter_period(fuel_entries, 'fecha')
+    rounds = filter_period(rounds, 'fecha')
+    practices = filter_period(practices, 'fecha_inicio')
+
+    month_names = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
+    emergencies_by_month = [0] * 12
+    emergencies_by_type = defaultdict(int)
+    dispatch_hours = [0] * 24
+    company_attendance = defaultdict(lambda: {'count': 0, 'people': set()})
+    attendance_modes = defaultdict(int)
+    volunteer_attendance = defaultdict(int)
+    distinct_volunteers = set()
+    institutional_support = defaultdict(int)
+    emergency_units_total = 0
+    support_terms = {
+        'Carabineros': ('carabinero',),
+        'Municipalidad': ('municipalidad', 'municipal'),
+        'Ambulancia': ('ambulancia', 'sam u', 'samu'),
+        'Otro Cuerpo de Bomberos': ('otro cuerpo', 'compañía de bomberos de', 'compania de bomberos de'),
+        'CMPC': ('cmpc',),
+        'CONAF': ('conaf',),
+        'PDI': ('pdi',),
+    }
+
+    for emergency in emergencies:
+        event_date = timezone.localtime(emergency.fecha_hora_alarma)
+        emergencies_by_month[event_date.month - 1] += 1
+        emergencies_by_type[emergency.get_tipo_display()] += 1
+        dispatch_hours[event_date.hour] += 1
+        emergency_description = (emergency.descripcion or '').casefold()
+        for institution, terms in support_terms.items():
+            if any(term in emergency_description for term in terms):
+                institutional_support[institution] += 1
+        unit_attendees = set()
+        for detail in emergency.unidades_asistencia.all():
+            emergency_units_total += 1
+            unit_attendees.update(detail.asistentes.all())
+        station_attendees = set(emergency.asistentes.all())
+        all_attendees = unit_attendees | station_attendees
+        mode = 'Carro y cuartel' if unit_attendees and station_attendees and unit_attendees & station_attendees else None
+        if mode:
+            attendance_modes[mode] += len(unit_attendees & station_attendees)
+        attendance_modes['Carro'] += len(unit_attendees - station_attendees)
+        attendance_modes['Cuartel'] += len(station_attendees - unit_attendees)
+        for person in all_attendees:
+            distinct_volunteers.add(person.pk)
+            volunteer_attendance[person.get_full_name()] += 1
+            company_name = person.compania.nombre if person.compania else 'Oficiales / otros'
+            company_attendance[company_name]['count'] += 1
+            company_attendance[company_name]['people'].add(person.pk)
+
+    # Salidas y kilometraje por unidad; solo se contabiliza distancia no negativa.
+    exits_by_unit = defaultdict(lambda: {'count': 0, 'km': 0})
+    novelty_types = defaultdict(int)
+    novelties_by_unit = defaultdict(int)
+    special_services = defaultdict(lambda: {'count': 0, 'km': 0})
+    outings_count = 0
+    outing_km_total = 0
+    novelty_keywords = [
+        ('ERA / cilindros', ('era', 'cilindro', 'respiración')),
+        ('Combustible', ('combustible', 'gasolina', 'diésel', 'diesel', 'petróleo')),
+        ('Mangueras / material', ('manguera', 'material')),
+        ('Mecánica / carrocería', ('mecánica', 'mecanica', 'motor', 'carrocería', 'carroceria')),
+        ('Luces / balizas', ('luz', 'luces', 'baliza')),
+        ('Equipo sonoro / sirena', ('sirena', 'sonora', 'bocina')),
+        ('Radio / comunicaciones', ('radio', 'comunicación', 'comunicacion')),
+    ]
+    for outing in outings:
+        outings_count += 1
+        distance = max(0, (outing.kilometraje_regreso or outing.kilometraje_salida) - outing.kilometraje_salida)
+        outing_km_total += distance
+        outing_reason = (outing.motivo or '').casefold()
+        if 'servicio especial' in outing_reason or 'especial' in outing_reason:
+            special_services['Servicios especiales']['count'] += 1
+            special_services['Servicios especiales']['km'] += distance
+        if '6-13' in outing_reason or '6 13' in outing_reason:
+            special_services['Movimientos 6-13']['count'] += 1
+            special_services['Movimientos 6-13']['km'] += distance
+        units = list(outing.unidades.all())
+        if not units:
+            units = [name.strip() for name in (outing.unidades_involucradas or '').split(',') if name.strip()]
+        for unit in units:
+            unit_name = unit.nombre if hasattr(unit, 'nombre') else unit
+            exits_by_unit[unit_name]['count'] += 1
+            exits_by_unit[unit_name]['km'] += distance
+            description = (outing.descripcion or '').strip()
+            if description:
+                lowered = description.casefold()
+                category = next((label for label, words in novelty_keywords if any(word in lowered for word in words)), 'Otras')
+                novelty_types[category] += 1
+                novelties_by_unit[unit_name] += 1
+
+    # Las compras de combustible se identifican por sus descripciones de caja.
+    fuel_words = ('combustible', 'gasolina', 'diésel', 'diesel', 'petróleo', 'petroleo', 'bencina')
+    fuel_by_month = [0.0] * 12
+    fuel_by_vehicle = defaultdict(float)
+    fuel_total = 0.0
+    vehicles = list(Vehiculo.objects.filter(compania_id=company_id).values_list('nombre', flat=True)) if company_id and not request.user.is_superuser else list(Vehiculo.objects.values_list('nombre', flat=True))
+    for entry in fuel_entries:
+        description = (entry.descripcion or '').casefold()
+        if not any(word in description for word in fuel_words):
+            continue
+        amount = float(entry.monto or 0)
+        fuel_total += amount
+        fuel_month = timezone.localtime(entry.fecha).month
+        fuel_by_month[fuel_month - 1] += amount
+        vehicle_name = next((name for name in vehicles if name.casefold() in description), 'Carro no especificado')
+        fuel_by_vehicle[vehicle_name] += amount
+
+    rounds_by_vehicle = defaultdict(lambda: {'count': 0, 'failures': 0})
+    failed_items = defaultdict(int)
+    machinist_rounds = defaultdict(int)
+    for round_item in rounds:
+        name = round_item.vehiculo.nombre
+        rounds_by_vehicle[name]['count'] += 1
+        if round_item.tipo_hallazgo in ('Falla', 'Observación', 'Otro'):
+            rounds_by_vehicle[name]['failures'] += 1
+            detail = (round_item.detalle or '').casefold()
+            category = next((label for label, words in novelty_keywords if any(word in detail for word in words)), 'Otras novedades')
+            failed_items[category] += 1
+        if round_item.registrado_por and round_item.registrado_por.rol and 'maquinista' in round_item.registrado_por.rol.nombre.casefold():
+            machinist_rounds[round_item.registrado_por.get_full_name()] += 1
+
+    practice_hours = defaultdict(float)
+    for practice in practices:
+        duration = max(0.0, (practice.fecha_fin - practice.fecha_inicio).total_seconds() / 3600)
+        for participant in practice.asistentes.all():
+            practice_hours[participant.get_full_name()] += duration
+
+    def top(mapping, key='count', limit=12):
+        return sorted(mapping.items(), key=lambda pair: pair[1][key] if isinstance(pair[1], dict) else pair[1], reverse=True)[:limit]
+
+    charts = {
+        'months': month_names,
+        'emergenciesByMonth': emergencies_by_month,
+        'emergenciesByType': {'labels': [item[0] for item in top(emergencies_by_type)], 'values': [item[1] for item in top(emergencies_by_type)]},
+        'institutionalSupport': {'labels': [item[0] for item in top(institutional_support)], 'values': [item[1] for item in top(institutional_support)]},
+        'dispatchByHour': {'labels': [f'{hour:02d}:00' for hour in range(24)], 'values': dispatch_hours},
+        'exitsByUnit': {'labels': [item[0] for item in top(exits_by_unit)], 'values': [item[1]['count'] for item in top(exits_by_unit)], 'km': [item[1]['km'] for item in top(exits_by_unit)]},
+        'noveltyTypes': {'labels': [item[0] for item in top(novelty_types)], 'values': [item[1] for item in top(novelty_types)]},
+        'noveltiesByUnit': {'labels': [item[0] for item in top(novelties_by_unit)], 'values': [item[1] for item in top(novelties_by_unit)]},
+        'specialServices': {'labels': [item[0] for item in top(special_services)], 'values': [item[1]['count'] for item in top(special_services)], 'km': [item[1]['km'] for item in top(special_services)]},
+        'attendanceByCompany': {'labels': [item[0] for item in top(company_attendance)], 'values': [item[1]['count'] for item in top(company_attendance)], 'volunteers': [len(item[1]['people']) for item in top(company_attendance)]},
+        'attendanceModes': {'labels': list(attendance_modes.keys()), 'values': list(attendance_modes.values())},
+        'topVolunteers': {'labels': [item[0] for item in top(volunteer_attendance, limit=15)], 'values': [item[1] for item in top(volunteer_attendance, limit=15)]},
+        'fuelByMonth': fuel_by_month,
+        'fuelByVehicle': {'labels': [item[0] for item in top(fuel_by_vehicle)], 'values': [round(item[1]) for item in top(fuel_by_vehicle)]},
+        'roundsByVehicle': {'labels': [item[0] for item in top(rounds_by_vehicle)], 'values': [item[1]['count'] for item in top(rounds_by_vehicle)], 'failures': [item[1]['failures'] for item in top(rounds_by_vehicle)]},
+        'roundFailures': {'labels': [item[0] for item in top(failed_items)], 'values': [item[1] for item in top(failed_items)]},
+        'machinistRounds': {'labels': [item[0] for item in top(machinist_rounds)], 'values': [item[1] for item in top(machinist_rounds)]},
+        'practiceHours': {'labels': [item[0] for item in top(practice_hours)], 'values': [round(item[1], 1) for item in top(practice_hours)]},
+    }
+    years = [str(item) for item in range(current_year, current_year - 8, -1)]
+    context = {
+        'charts': charts,
+        'kpis': [
+            ('Emergencias', sum(emergencies_by_month)),
+            ('Salidas de carros', emergency_units_total),
+            ('Salidas a terreno', outings_count),
+            ('Km en salidas', f'{outing_km_total:,}'.replace(',', '.')),
+            ('Voluntarios distintos', len(distinct_volunteers)),
+            ('Combustible cargado', f'${fuel_total:,.0f}'.replace(',', '.')),
+        ],
+        'periodo': selected_period,
+        'years': years,
+        'emergencies_total': sum(emergencies_by_month),
+        'emergency_units_total': emergency_units_total,
+        'outings_total': outings_count,
+        'km_total': outing_km_total,
+        'volunteers_total': len(distinct_volunteers),
+        'fuel_total': fuel_total,
+        'rounds_total': sum(item['count'] for item in rounds_by_vehicle.values()),
+        'company_name': request.user.compania.nombre if not request.user.is_superuser and request.user.compania else 'Todas las compañías',
+    }
+    return render(request, 'usuarios/estadisticas_operativas.html', context)
 
 @login_required
 def generar_reporte_anual_pdf(request):

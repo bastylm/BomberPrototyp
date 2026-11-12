@@ -1,0 +1,128 @@
+{% extends 'base_con_condicion.html' %}
+
+{% block title %}Estadísticas Operativas - {{ block.super }}{% endblock %}
+
+{% block content %}
+<style>
+    .ops-stat { border: 1px solid var(--bs-border-color); border-radius: 1rem; height: 100%; background: var(--bs-body-bg); }
+    .ops-stat .card-body { padding: 1.15rem; }
+    .ops-stat .chart-wrap { height: 285px; position: relative; }
+    .ops-kpi { border-left: 4px solid #dc3545; }
+    .ops-section-title { border-bottom: 1px solid var(--bs-border-color); padding-bottom: .55rem; margin: 1.8rem 0 1rem; }
+    .ops-empty { display: none; }
+</style>
+<main class="container-fluid py-3">
+    <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-end gap-3 mb-4">
+        <div>
+            <h1 class="h2 mb-1"><i class="bi bi-graph-up-arrow text-danger me-2"></i>Estadísticas Operativas</h1>
+            <p class="text-muted mb-0">Indicadores calculados a partir de los registros operativos · {{ company_name }}</p>
+        </div>
+        <form method="get" class="d-flex align-items-center gap-2">
+            <label for="periodo" class="form-label mb-0">Período</label>
+            <select class="form-select" name="periodo" id="periodo" onchange="this.form.submit()">
+                <option value="todos" {% if periodo == 'todos' %}selected{% endif %}>Todos los años</option>
+                {% for year_option in years %}<option value="{{ year_option }}" {% if periodo == year_option %}selected{% endif %}>{{ year_option }}</option>{% endfor %}
+            </select>
+        </form>
+    </div>
+
+    <div class="row row-cols-2 row-cols-md-3 row-cols-xl-6 g-3 mb-4">
+        {% for label, value in kpis %}<div class="col"><div class="card ops-stat ops-kpi"><div class="card-body"><div class="small text-muted">{{ label }}</div><div class="h3 mb-0">{{ value }}</div></div></div></div>{% endfor %}
+    </div>
+
+    <h2 class="h5 ops-section-title">Emergencias</h2>
+    <div class="row g-3">
+        <div class="col-12 col-xl-6"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Emergencias por mes</h3><p class="small text-muted">Distribución mensual dentro del período seleccionado.</p><div class="chart-wrap"><canvas id="emergenciesByMonth"></canvas></div></div></div></div>
+        <div class="col-12 col-xl-6"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Emergencias por tipo</h3><p class="small text-muted">Cada emergencia se cuenta una vez, aunque asistan varios carros.</p><div class="chart-wrap"><canvas id="emergenciesByType"></canvas></div></div></div></div>
+        <div class="col-12 col-xl-6"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Apoyo de otras instituciones</h3><p class="small text-muted">Se identifica cuando la institución aparece en la descripción de la emergencia.</p><div class="chart-wrap"><canvas id="institutionalSupport"></canvas></div></div></div></div>
+        <div class="col-12"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Día y hora de despacho</h3><p class="small text-muted">Emergencias agrupadas por hora de alarma.</p><div class="chart-wrap"><canvas id="dispatchByHour"></canvas></div></div></div></div>
+    </div>
+
+    <h2 class="h5 ops-section-title">Unidades y novedades</h2>
+    <div class="row g-3">
+        <div class="col-12 col-xl-6"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Salidas registradas por carro</h3><p class="small text-muted">Salidas a terreno y kilómetros de los partes registrados.</p><div class="chart-wrap"><canvas id="exitsByUnit"></canvas></div></div></div></div>
+        <div class="col-12 col-xl-6"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Novedades reportadas por tipo</h3><p class="small text-muted">Clasificación automática del campo de descripción de las salidas.</p><div class="chart-wrap"><canvas id="noveltyTypes"></canvas></div></div></div></div>
+        <div class="col-12 col-xl-6"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Servicios especiales y movimientos 6-13</h3><p class="small text-muted">Clasificados por el motivo ingresado en la salida, con sus kilómetros.</p><div class="chart-wrap"><canvas id="specialServices"></canvas></div></div></div></div>
+        <div class="col-12"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Novedades por carro</h3><p class="small text-muted">Partes con descripción de novedades.</p><div class="chart-wrap"><canvas id="noveltiesByUnit"></canvas></div></div></div></div>
+    </div>
+
+    <h2 class="h5 ops-section-title">Personal y asistencia</h2>
+    <div class="row g-3">
+        <div class="col-12 col-xl-6"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Asistencias por compañía</h3><p class="small text-muted">Participaciones registradas y voluntarios distintos.</p><div class="chart-wrap"><canvas id="attendanceByCompany"></canvas></div></div></div></div>
+        <div class="col-12 col-xl-6"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Cómo asistieron</h3><p class="small text-muted">Carro, cuartel o asistencia registrada en ambos.</p><div class="chart-wrap"><canvas id="attendanceModes"></canvas></div></div></div></div>
+        <div class="col-12"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Voluntarios con más asistencias</h3><p class="small text-muted">Los 15 primeros según los registros del período.</p><div class="chart-wrap"><canvas id="topVolunteers"></canvas></div></div></div></div>
+    </div>
+
+    <h2 class="h5 ops-section-title">Combustible, rondas y prácticas</h2>
+    <div class="row g-3">
+        <div class="col-12 col-xl-6"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Combustible cargado por mes ($)</h3><p class="small text-muted">Egresos de caja que mencionan combustible, gasolina, diésel o petróleo.</p><div class="chart-wrap"><canvas id="fuelByMonth"></canvas></div></div></div></div>
+        <div class="col-12 col-xl-6"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Combustible por carro ($)</h3><p class="small text-muted">Se asigna al carro si su nombre aparece en la descripción del egreso.</p><div class="chart-wrap"><canvas id="fuelByVehicle"></canvas></div></div></div></div>
+        <div class="col-12 col-xl-6"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Rondas por carro</h3><p class="small text-muted">Rondas realizadas y hallazgos distintos de “Sin novedad”.</p><div class="chart-wrap"><canvas id="roundsByVehicle"></canvas></div></div></div></div>
+        <div class="col-12 col-xl-6"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Ítems con falla en rondas</h3><p class="small text-muted">Agrupación de las observaciones registradas.</p><div class="chart-wrap"><canvas id="roundFailures"></canvas></div></div></div></div>
+        <div class="col-12 col-xl-6"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Rondas registradas por maquinistas</h3><p class="small text-muted">Según el rol de la persona que registró cada ronda.</p><div class="chart-wrap"><canvas id="machinistRounds"></canvas></div></div></div></div>
+        <div class="col-12 col-xl-6"><div class="card ops-stat"><div class="card-body"><h3 class="h6">Prácticas de maquinista: horas por aspirante</h3><p class="small text-muted">Capacitaciones con “maquinista” o “práctica” en el nombre o descripción y hora de término registrada.</p><div class="chart-wrap"><canvas id="practiceHours"></canvas></div></div></div></div>
+    </div>
+</main>
+{{ charts|json_script:"operational-charts-data" }}
+{% endblock %}
+
+{% block scripts %}
+{{ block.super }}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const data = JSON.parse(document.getElementById('operational-charts-data').textContent);
+    const red = '#dc3545';
+    const redSoft = ['#dc3545','#b02a37','#e4606d','#8f1d2c','#f08a95','#a52834','#c94754','#721c24','#ef6a76','#9b2431','#d95360','#bb2d3b','#f2a0a7','#842029','#c23c49'];
+    const base = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { beginAtZero: true, grid: { color: 'rgba(108,117,125,.12)' } }, y: { grid: { display: false } } } };
+    function chart(id, labels, datasets, type = 'bar', horizontal = false, options = {}) {
+        const canvas = document.getElementById(id);
+        if (!canvas) return;
+        const hasValues = datasets.some(dataset => dataset.data.some(value => Number(value) > 0));
+        if (!hasValues) {
+            const message = document.createElement('div');
+            message.className = 'h-100 d-flex align-items-center justify-content-center text-muted small';
+            message.textContent = 'No hay datos registrados para el período seleccionado.';
+            canvas.parentElement.appendChild(message);
+            canvas.remove();
+            return;
+        }
+        const chartOptions = JSON.parse(JSON.stringify(base));
+        if (horizontal) chartOptions.indexAxis = 'y';
+        if (type === 'line') {
+            chartOptions.scales.x.grid.display = false;
+            chartOptions.elements = { line: { tension: .3 } };
+        }
+        Object.assign(chartOptions, options);
+        new Chart(canvas, { type, data: { labels, datasets: datasets.map((dataset, index) => ({
+            label: dataset.label || 'Registros', data: dataset.data,
+            backgroundColor: dataset.color || (type === 'line' ? red : (dataset.data.length > 1 ? dataset.data.map((_, i) => redSoft[i % redSoft.length]) : red)),
+            borderColor: dataset.color || red, borderWidth: type === 'line' ? 2 : 1,
+            borderRadius: type === 'bar' ? 4 : 0,
+            fill: type === 'line' ? false : undefined,
+            pointBackgroundColor: red,
+            ...(dataset.extra || {})
+        })) }, options: chartOptions });
+    }
+    chart('emergenciesByMonth', data.months, [{label:'Emergencias',data:data.emergenciesByMonth}], 'bar', false);
+    chart('emergenciesByType', data.emergenciesByType.labels, [{data:data.emergenciesByType.values}], 'bar', true);
+    chart('institutionalSupport', data.institutionalSupport.labels, [{data:data.institutionalSupport.values}], 'bar', true);
+    chart('dispatchByHour', data.dispatchByHour.labels, [{data:data.dispatchByHour.values}], 'bar');
+    chart('exitsByUnit', data.exitsByUnit.labels, [{label:'Salidas',data:data.exitsByUnit.values,extra:{km:data.exitsByUnit.km}}], 'bar', true, {plugins:{legend:{display:false},tooltip:{callbacks:{afterLabel:context=>`${Number(data.exitsByUnit.km[context.dataIndex]||0).toLocaleString('es-CL')} km`}}}});
+    chart('noveltyTypes', data.noveltyTypes.labels, [{data:data.noveltyTypes.values}], 'bar', true);
+    chart('noveltiesByUnit', data.noveltiesByUnit.labels, [{data:data.noveltiesByUnit.values}], 'bar', true);
+    chart('specialServices', data.specialServices.labels, [{data:data.specialServices.values,extra:{km:data.specialServices.km}}], 'bar', true, {plugins:{legend:{display:false},tooltip:{callbacks:{afterLabel:context=>`${Number(data.specialServices.km[context.dataIndex]||0).toLocaleString('es-CL')} km`}}}});
+    chart('attendanceByCompany', data.attendanceByCompany.labels, [{label:'Asistencias',data:data.attendanceByCompany.values,extra:{volunteers:data.attendanceByCompany.volunteers}}], 'bar', true, {plugins:{legend:{display:false},tooltip:{callbacks:{afterLabel:context=>`${data.attendanceByCompany.volunteers[context.dataIndex]} voluntarios distintos`}}}});
+    chart('attendanceModes', data.attendanceModes.labels, [{data:data.attendanceModes.values}], 'bar', true);
+    chart('topVolunteers', data.topVolunteers.labels, [{data:data.topVolunteers.values}], 'bar', true);
+    chart('fuelByMonth', data.months, [{data:data.fuelByMonth}], 'bar');
+    chart('fuelByVehicle', data.fuelByVehicle.labels, [{data:data.fuelByVehicle.values}], 'bar', true, {plugins:{legend:{display:false},tooltip:{callbacks:{label:context=>'$'+Number(context.raw).toLocaleString('es-CL')}}}});
+    chart('roundsByVehicle', data.roundsByVehicle.labels, [
+        {label:'Rondas',data:data.roundsByVehicle.values,color:red},
+        {label:'Hallazgos',data:data.roundsByVehicle.failures,color:'#6c757d'}
+    ], 'bar', true, {plugins:{legend:{display:true,position:'bottom'}}});
+    chart('roundFailures', data.roundFailures.labels, [{data:data.roundFailures.values}], 'bar', true);
+    chart('machinistRounds', data.machinistRounds.labels, [{data:data.machinistRounds.values}], 'bar', true);
+    chart('practiceHours', data.practiceHours.labels, [{data:data.practiceHours.values}], 'bar', true);
+});
+</script>
+{% endblock %}
