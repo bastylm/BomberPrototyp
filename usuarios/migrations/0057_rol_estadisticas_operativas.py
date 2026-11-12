@@ -4,7 +4,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('usuarios', '0053_chatbot_reglas'),
+        ('usuarios', '0056_guia_agregar_documento'),
     ]
 
     operations = [
