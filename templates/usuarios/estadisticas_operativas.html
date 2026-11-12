@@ -16,6 +16,7 @@
         <div>
             <h1 class="h2 mb-1"><i class="bi bi-graph-up-arrow text-danger me-2"></i>Estadísticas Operativas</h1>
             <p class="text-muted mb-0">Indicadores calculados a partir de los registros operativos · {{ company_name }}</p>
+            <p class="small text-muted mb-0 mt-1">La etiqueta <span class="badge bg-danger-subtle text-danger">Ejemplo</span> identifica gráficos ilustrativos cuando no hay registros para el período elegido.</p>
         </div>
         <form method="get" class="d-flex align-items-center gap-2">
             <label for="periodo" class="form-label mb-0">Período</label>
@@ -79,11 +80,41 @@ document.addEventListener('DOMContentLoaded', function () {
     const red = '#dc3545';
     const redSoft = ['#dc3545','#b02a37','#e4606d','#8f1d2c','#f08a95','#a52834','#c94754','#721c24','#ef6a76','#9b2431','#d95360','#bb2d3b','#f2a0a7','#842029','#c23c49'];
     const base = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { beginAtZero: true, grid: { color: 'rgba(108,117,125,.12)' } }, y: { grid: { display: false } } } };
+    const examples = {
+        emergenciesByMonth: { labels: data.months, datasets: [{label:'Emergencias de ejemplo',data:[8,6,9,7,11,8,10,9,12,7,6,5]}] },
+        emergenciesByType: { labels:['Incendio estructural','Incendio forestal','Rescate vehicular','Rescate de personas','Otros'], datasets:[{label:'Emergencias de ejemplo',data:[18,14,9,7,5]}] },
+        institutionalSupport: { labels:['Carabineros','Municipalidad','Ambulancia','CONAF'], datasets:[{label:'Apoyos de ejemplo',data:[12,8,6,4]}] },
+        dispatchByHour: { labels:Array.from({length:24},(_,hour)=>`${String(hour).padStart(2,'0')}:00`), datasets:[{label:'Despachos de ejemplo',data:[1,0,0,0,0,1,2,3,4,3,4,5,4,5,4,3,4,5,6,5,4,3,2,1]}] },
+        exitsByUnit: { labels:['B-1','B-2','B-3','Z-1','R-1'], datasets:[{label:'Salidas de ejemplo',data:[28,22,19,14,11]}] },
+        noveltyTypes: { labels:['Combustible','Luces / balizas','Mangueras / material','Mecánica / carrocería'], datasets:[{label:'Novedades de ejemplo',data:[8,6,4,3]}] },
+        noveltiesByUnit: { labels:['B-1','B-2','B-3','Z-1'], datasets:[{label:'Partes con novedades de ejemplo',data:[7,5,4,3]}] },
+        specialServices: { labels:['Servicios especiales','Movimientos 6-13'], datasets:[{label:'Salidas de ejemplo',data:[6,9]}] },
+        attendanceByCompany: { labels:['1ra Compañía','2da Compañía','3ra Compañía','Oficiales / otros'], datasets:[{label:'Asistencias de ejemplo',data:[42,36,51,8]}] },
+        attendanceModes: { labels:['Carro','Cuartel','Carro y cuartel'], datasets:[{label:'Asistencias de ejemplo',data:[86,31,12]}] },
+        topVolunteers: { labels:['Voluntario Demo 1','Voluntaria Demo 2','Voluntario Demo 3','Voluntaria Demo 4','Voluntario Demo 5'], datasets:[{label:'Asistencias de ejemplo',data:[24,20,17,14,11]}] },
+        fuelByMonth: { labels:data.months, datasets:[{label:'Combustible de ejemplo ($)',data:[120000,95000,140000,110000,175000,130000,160000,145000,185000,125000,105000,90000]}] },
+        fuelByVehicle: { labels:['B-1','B-2','B-3','Z-1'], datasets:[{label:'Combustible de ejemplo ($)',data:[420000,365000,510000,285000]}] },
+        roundsByVehicle: { labels:['B-1','B-2','B-3','Z-1'], datasets:[{label:'Rondas de ejemplo',data:[18,15,21,12],color:red},{label:'Hallazgos de ejemplo',data:[3,2,4,1],color:'#6c757d'}] },
+        roundFailures: { labels:['Luces / balizas','Neumáticos','Combustible','Equipo de seguridad'], datasets:[{label:'Hallazgos de ejemplo',data:[5,4,3,2]}] },
+        machinistRounds: { labels:['Maquinista Demo 1','Maquinista Demo 2','Maquinista Demo 3'], datasets:[{label:'Rondas de ejemplo',data:[12,9,7]}] },
+        practiceHours: { labels:['Aspirante Demo 1','Aspirante Demo 2','Aspirante Demo 3','Aspirante Demo 4'], datasets:[{label:'Horas de ejemplo',data:[8,6,4.5,3]}] }
+    };
     function chart(id, labels, datasets, type = 'bar', horizontal = false, options = {}) {
         const canvas = document.getElementById(id);
         if (!canvas) return;
         const hasValues = datasets.some(dataset => dataset.data.some(value => Number(value) > 0));
-        if (!hasValues) {
+        if (!hasValues && examples[id]) {
+            labels = examples[id].labels;
+            datasets = examples[id].datasets;
+            options = id === 'roundsByVehicle' ? {plugins:{legend:{display:true,position:'bottom'}}} : {};
+            const title = canvas.closest('.ops-stat')?.querySelector('h3');
+            if (title && !title.querySelector('.ops-example-badge')) {
+                const badge = document.createElement('span');
+                badge.className = 'badge bg-danger-subtle text-danger ms-2 ops-example-badge';
+                badge.textContent = 'Ejemplo';
+                title.appendChild(badge);
+            }
+        } else if (!hasValues) {
             (canvas.closest('.col-12') || canvas.closest('.ops-stat'))?.remove();
             return;
         }
