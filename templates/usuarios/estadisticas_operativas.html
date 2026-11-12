@@ -6,7 +6,7 @@
 <style>
     .ops-stat { border: 1px solid var(--bs-border-color); border-radius: 1rem; height: 100%; background: var(--bs-body-bg); }
     .ops-stat .card-body { padding: 1.15rem; }
-    .ops-stat .chart-wrap { height: 285px; position: relative; }
+    .ops-stat .chart-wrap { height: 250px; position: relative; }
     .ops-kpi { border-left: 4px solid #dc3545; }
     .ops-section-title { border-bottom: 1px solid var(--bs-border-color); padding-bottom: .55rem; margin: 1.8rem 0 1rem; }
     .ops-empty { display: none; }
@@ -24,6 +24,11 @@
                 {% for year_option in years %}<option value="{{ year_option }}" {% if periodo == year_option %}selected{% endif %}>{{ year_option }}</option>{% endfor %}
             </select>
         </form>
+    </div>
+
+    <div class="alert alert-light border d-none align-items-center gap-2 mb-4" id="ops-no-data" role="status">
+        <i class="bi bi-info-circle text-danger" aria-hidden="true"></i>
+        <span>No hay gráficos con datos para este período. Prueba con <a href="?periodo=todos" class="alert-link">Todos los años</a> o registra información en los módulos correspondientes.</span>
     </div>
 
     <div class="row row-cols-2 row-cols-md-3 row-cols-xl-6 g-3 mb-4">
@@ -79,11 +84,7 @@ document.addEventListener('DOMContentLoaded', function () {
         if (!canvas) return;
         const hasValues = datasets.some(dataset => dataset.data.some(value => Number(value) > 0));
         if (!hasValues) {
-            const message = document.createElement('div');
-            message.className = 'h-100 d-flex align-items-center justify-content-center text-muted small';
-            message.textContent = 'No hay datos registrados para el período seleccionado.';
-            canvas.parentElement.appendChild(message);
-            canvas.remove();
+            (canvas.closest('.col-12') || canvas.closest('.ops-stat'))?.remove();
             return;
         }
         const chartOptions = JSON.parse(JSON.stringify(base));
@@ -123,6 +124,18 @@ document.addEventListener('DOMContentLoaded', function () {
     chart('roundFailures', data.roundFailures.labels, [{data:data.roundFailures.values}], 'bar', true);
     chart('machinistRounds', data.machinistRounds.labels, [{data:data.machinistRounds.values}], 'bar', true);
     chart('practiceHours', data.practiceHours.labels, [{data:data.practiceHours.values}], 'bar', true);
+
+    document.querySelectorAll('.ops-section-title').forEach(title => {
+        const row = title.nextElementSibling;
+        if (row && !row.querySelector('.ops-stat')) {
+            title.remove();
+            row.remove();
+        }
+    });
+    if (!document.querySelector('.ops-stat canvas')) {
+        document.getElementById('ops-no-data')?.classList.remove('d-none');
+        document.getElementById('ops-no-data')?.classList.add('d-flex');
+    }
 });
 </script>
 {% endblock %}
