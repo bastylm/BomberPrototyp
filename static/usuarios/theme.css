@@ -729,6 +729,103 @@ body select option:checked {
     background: #dc3545 linear-gradient(#dc3545, #dc3545);
 }
 
+/* Aviso persistente de que esta instancia es una demostración. */
+.demo-notice {
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+    padding: 0.9rem 1.1rem;
+    border: 1px solid rgba(220, 53, 69, 0.22);
+    border-left: 4px solid #dc3545;
+    border-radius: 0.85rem;
+    background: linear-gradient(100deg, #fff5f5 0%, #fff 75%);
+    color: #343a40;
+    box-shadow: 0 4px 14px rgba(33, 37, 41, 0.045);
+}
+.demo-notice-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 2.25rem;
+    width: 2.25rem;
+    height: 2.25rem;
+    border-radius: 50%;
+    background: #dc3545;
+    color: #fff;
+}
+.demo-notice strong { color: #b42332; }
+.demo-notice p { margin-top: 0.15rem; color: #626b74; font-size: 0.9rem; }
+.demo-notice-badge {
+    flex: 0 0 auto;
+    margin-left: auto;
+    padding: 0.35rem 0.6rem;
+    border-radius: 999px;
+    background: rgba(220, 53, 69, 0.1);
+    color: #b42332;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+}
+
+/* Presentación común de las tablas con acento institucional rojo. */
+.page-content .table-responsive {
+    overflow: auto;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.75rem;
+    background-color: var(--card-bg, #fff);
+}
+.page-content .table {
+    --bs-table-bg: transparent;
+    --bs-table-hover-bg: rgba(220, 53, 69, 0.045);
+    margin-bottom: 0;
+    color: var(--text-color, #212529);
+    vertical-align: middle;
+}
+.page-content .table thead th {
+    padding: 0.8rem 0.9rem;
+    border-bottom: 1px solid #e5c4c8;
+    background: #fff5f5;
+    color: #7f2630;
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.035em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+.page-content .table tbody td {
+    padding: 0.75rem 0.9rem;
+    border-bottom-color: #edf0f2;
+}
+.page-content .table tbody tr:last-child td { border-bottom: 0; }
+.page-content .table-hover tbody tr:hover > * { color: inherit; }
+
+body.dark-mode .demo-notice {
+    border-color: rgba(255, 154, 162, 0.24);
+    background: linear-gradient(100deg, #3a2024 0%, #272b30 78%);
+    color: #f1f3f5;
+}
+body.dark-mode .demo-notice strong,
+body.dark-mode .demo-notice-badge { color: #ffadb4; }
+body.dark-mode .demo-notice p { color: #d0d5da; }
+body.dark-mode .demo-notice-badge { background: rgba(255, 154, 162, 0.12); }
+body.dark-mode .page-content .table-responsive { border-color: #495057; }
+body.dark-mode .page-content .table thead th {
+    border-bottom-color: #694149;
+    background: #38262a;
+    color: #ffadb4;
+}
+body.dark-mode .page-content .table tbody td { border-bottom-color: #3d4349; }
+
+@media (max-width: 575.98px) {
+    .demo-notice { align-items: flex-start; padding: 0.8rem; gap: 0.65rem; }
+    .demo-notice-icon { flex-basis: 2rem; width: 2rem; height: 2rem; }
+    .demo-notice p { font-size: 0.82rem; }
+    .demo-notice-badge { display: none; }
+    .page-content .table thead th,
+    .page-content .table tbody td { padding: 0.65rem 0.7rem; }
+}
+
 body select option:hover {
     color: #fff;
     background: #c82333 linear-gradient(#c82333, #c82333);

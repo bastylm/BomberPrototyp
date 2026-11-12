@@ -410,6 +410,14 @@
             </header>
             <!-- Page Content -->
             <div class="page-content">
+                <aside class="demo-notice mb-4" role="note" aria-label="Aviso de entorno de demostración">
+                    <span class="demo-notice-icon" aria-hidden="true"><i class="bi bi-info-circle-fill"></i></span>
+                    <div>
+                        <strong>Estás en una demo</strong>
+                        <p class="mb-0">Puedes crear, editar y eliminar registros para probar el sistema. Los cambios se aplican solo en esta demostración y no afectan al sistema principal.</p>
+                    </div>
+                    <span class="demo-notice-badge">ENTORNO DE PRUEBA</span>
+                </aside>
                 {% block content %}{% endblock %}
             </div>
         </div>
